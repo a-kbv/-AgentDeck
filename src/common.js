@@ -54,9 +54,13 @@ document.querySelectorAll("[data-icon]").forEach(el => { el.outerHTML = icon(el.
 // ---------- live status ----------
 const sessionKey = s => `${s.agent}:${s.id}`;
 // The line that resumes a session by hand, for PowerShell (what Windows Terminal opens): into its folder, then the
-// agent as main.js's agentCommand starts it.
+// agent as main.js's agentCommand starts it. The line is pasted and run, so the id has to pass main.js's SESSION_ID
+// check (else ""), and the folder is quoted against every quote PowerShell ends a '...' string on, curly ones too.
 const RESUME_ARGS = { Claude: ["--resume"], Codex: ["resume"], OpenCode: ["--session"] };
-const resumeCommand = s => `cd '${String(s.cwd).replace(/'/g, "''")}'; ${s.agent.toLowerCase()} ${RESUME_ARGS[s.agent].join(" ")} ${s.id}`;
+const RESUME_ID = /^[\w.:-]{1,200}$/;
+const psLiteral = s => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
+const resumeCommand = s => (s?.cwd && Object.hasOwn(RESUME_ARGS, s.agent) && RESUME_ID.test(s.id)
+  ? `cd ${psLiteral(s.cwd)}; ${s.agent.toLowerCase()} ${RESUME_ARGS[s.agent].join(" ")} ${s.id}` : "");
 const STALE_MS = 10 * 60 * 1000;
 const lastSign = l => Math.max(l.activityAt || 0, l.statusAt || 0);
 const isStale = l => l.status === "busy" && Date.now() - lastSign(l) > STALE_MS;

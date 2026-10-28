@@ -253,6 +253,7 @@ async function showTerminal(s) {
 async function copyResume(s) {
   if (!s?.cwd) return toast(t("errors.sessionNoDir"), true);
   const cmd = resumeCommand(s);
+  if (!cmd) return toast(t("errors.invalidSession"), true);
   await window.manager.copyText(cmd);
   toast(t("toast.copied", { path: cmd }));
 }

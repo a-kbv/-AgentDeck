@@ -298,6 +298,7 @@ async function runAction(action, btn) {
     case "copy": await window.manager.copyText(path); return toast(t("toast.copied", { path }));
     case "copy-resume": {
       const cmd = resumeCommand(visible[Number(btn.closest(".sess").dataset.i)]);
+      if (!cmd) return toast(t("errors.invalidSession"), true);
       await window.manager.copyText(cmd);
       return toast(t("toast.copied", { path: cmd }));
     }
