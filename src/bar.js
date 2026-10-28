@@ -188,7 +188,8 @@ function rowHtml(r, i, toks) {
     <div class="rmain"><div class="t" title="${esc(s.title)}">${hl(s.title, toks)}</div>${r.showPath && s.cwd ? pathHtml(s.cwd, toks) : ""}${snipHtml(s, toks)}</div>
     ${livePill(l, key)}${usageCost(s)}<span class="when" title="${esc(fullDate(s.updatedAt))}">${esc(ago(s.updatedAt))}</span>
     <span class="ract">${hideBtn("session", key, hidden.sessions.has(key))}${s.cwd ? `<button class="icon-btn" data-act="terminal" data-path="${esc(s.cwd)}" title="${esc(t("bar.terminalIn", { path: s.cwd }))}">${icon("terminal")}</button>
-      <button class="icon-btn" data-act="copy" data-path="${esc(s.cwd)}" title="${esc(t("action.copyPath"))}">${icon("copy")}</button>` : ""}
+      <button class="icon-btn" data-act="copy" data-path="${esc(s.cwd)}" title="${esc(t("action.copyPath"))}">${icon("copy")}</button>
+      <button class="icon-btn" data-act="copy-resume" title="${esc(t("action.copyResume"))}">${icon("command")}</button>` : ""}
       ${l ? `<button class="icon-btn" data-act="resume" title="${esc(t("bar.alreadyOpen"))}">${icon("play")}</button>
       <button class="icon-btn go" data-act="show-terminal" title="${esc(t("term.showTitle", { pid: l.pid }))}">${icon("raise")}</button>`
         : `<button class="icon-btn danger" data-act="delete" title="${esc(t("bar.delete"))}">${icon("trash")}</button>
@@ -249,6 +250,12 @@ async function showTerminal(s) {
   const shown = st.opened;
   setTimeout(() => { if (st.opened === shown && st.shown && !document.hasFocus()) hide(); }, r.ok ? 1800 : 4500);
 }
+async function copyResume(s) {
+  if (!s?.cwd) return toast(t("errors.sessionNoDir"), true);
+  const cmd = resumeCommand(s);
+  await window.manager.copyText(cmd);
+  toast(t("toast.copied", { path: cmd }));
+}
 // Clicking a row or pressing Enter on it.
 const openSession = s => (s && liveOf(s) ? showTerminal(s) : resume(s));
 async function act(name, el) {
@@ -283,6 +290,7 @@ async function act(name, el) {
     if (name === "terminal") return await launch(() => window.manager.launchFolder(path));
     if (name === "explorer") { const err = await window.manager.openPath(path); if (err) throw new Error(err); return hide(); }
     if (name === "copy") { await window.manager.copyText(path); return toast(t("toast.copied", { path })); }
+    if (name === "copy-resume") return await copyResume(rows[Number(el.closest(".row")?.dataset.i)]?.s);
     if (name === "show-live") { setQuery(""); return selectTile("live"); }
     if (name === "toggle-hidden") {
       const set = el.dataset.kind === "project" ? hidden.projects : hidden.sessions;
@@ -451,6 +459,13 @@ document.addEventListener("keydown", e => {
     const left = e.key === "ArrowLeft";
     const caretFree = inQ && q.value && (left ? q.selectionStart > 0 : q.selectionEnd < q.value.length);
     if (!caretFree) { e.preventDefault(); moveTile(left ? -1 : 1); }
+    return;
+  }
+  // Ctrl+Shift+C: the highlighted session's resume command (plain Ctrl+C stays with the search text).
+  if (e.ctrlKey && e.shiftKey && e.code === "KeyC") {
+    e.preventDefault();
+    const s = rows[st.row >= 0 ? st.row : 0]?.s;
+    if (s) copyResume(s).catch(err => toast(err.message, true));
     return;
   }
   if (e.key === "Enter") {

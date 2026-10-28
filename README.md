@@ -86,6 +86,9 @@ Node.js, затова следват прокси настройките на Wi
   `Enter` does the same). AgentDeck brings that session's terminal to the front – in Windows Terminal the very tab,
   otherwise the window of the app it runs in (VS Code, Git Bash, a classic console). **Open again** still starts a
   second instance on the same conversation, after a warning.
+- **Resume command** – the clipboard button on a session row in the edge menu (or `Ctrl+Shift+C` on the highlighted
+  row) and **Command** on its card in the manager copy the line that resumes it by hand in PowerShell, e.g.
+  `cd 'D:\Work\AgentDeck'; claude --resume <id>` (`codex resume <id>`, `opencode --session <id>`).
 - **Preview** – the edge menu shows the highlighted session (or the first one) in a pane beside its rows; in the
   manager, resting the pointer on a session card for a moment opens the same preview beside the list. It has the
   last prompts and replies, the first prompt, the model, how many prompts, replies and subagents there are, and when

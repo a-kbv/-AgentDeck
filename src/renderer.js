@@ -152,7 +152,8 @@ function sessionHtml(s, i, toks) {
       ${usageChip(s)}
       ${resumeBtn}
       ${s.cwd ? `<button class="btn sm" data-action="terminal" data-path="${esc(s.cwd)}" title="${esc(t("action.terminalHere"))}" aria-label="${esc(t("action.terminal"))}">${icon("terminal")}<span class="bl">${esc(t("action.terminal"))}</span></button>
-      <button class="btn sm" data-action="explorer" data-path="${esc(s.cwd)}" title="${esc(t("action.explorerTitle"))}" aria-label="${esc(t("action.explorer"))}">${icon("open")}<span class="bl">${esc(t("action.explorer"))}</span></button>` : ""}
+      <button class="btn sm" data-action="explorer" data-path="${esc(s.cwd)}" title="${esc(t("action.explorerTitle"))}" aria-label="${esc(t("action.explorer"))}">${icon("open")}<span class="bl">${esc(t("action.explorer"))}</span></button>
+      <button class="btn sm" data-action="copy-resume" title="${esc(t("action.copyResume"))}" aria-label="${esc(t("action.copyResume"))}">${icon("command")}<span class="bl">${esc(t("action.command"))}</span></button>` : ""}
     </div></article>`;
 }
 
@@ -295,6 +296,11 @@ async function runAction(action, btn) {
     case "terminal": await window.manager.launchFolder(path); return toast(t("manager.toast.terminal", { path }));
     case "explorer": { const err = await window.manager.openPath(path); if (err) throw new Error(err); return; }
     case "copy": await window.manager.copyText(path); return toast(t("toast.copied", { path }));
+    case "copy-resume": {
+      const cmd = resumeCommand(visible[Number(btn.closest(".sess").dataset.i)]);
+      await window.manager.copyText(cmd);
+      return toast(t("toast.copied", { path: cmd }));
+    }
     case "rename": ui.renaming = normPath(path); return render();
     case "remove":
       if (!confirm(t("manager.confirm.remove", { path }))) return;

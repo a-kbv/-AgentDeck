@@ -18,7 +18,7 @@
       row(keys(s.ask), t("bar.shortcuts.ask")),
       row(keys("Esc"), t("bar.shortcuts.cancelRec"))
     ].join("");
-    const menu = [[["↑", "↓"], "bar.shortcuts.session"], [["←", "→"], "bar.shortcuts.project"], [["Enter"], "bar.shortcuts.open"],
+    const menu = [[["↑", "↓"], "bar.shortcuts.session"], [["←", "→"], "bar.shortcuts.project"], [["Enter"], "bar.shortcuts.open"], [["Ctrl", "Shift", "C"], "bar.shortcuts.copyResume"],
       [["Esc"], "bar.shortcuts.esc"], [["F5"], "bar.shortcuts.refresh"], [["F1"], "bar.shortcuts.help"]]
       .map(([k, what]) => row(k.map(x => `<kbd>${esc(x)}</kbd>`).join(" "), t(what))).join("")
       + row(`<span class="kbd-any">${esc(t("bar.shortcuts.typeAny"))}</span>`, t("bar.shortcuts.search"));

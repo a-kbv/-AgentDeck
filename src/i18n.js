@@ -21,6 +21,7 @@
       "bar.shortcuts.session": "Previous / next session",
       "bar.shortcuts.project": "Previous / next project",
       "bar.shortcuts.open": "Open the session",
+      "bar.shortcuts.copyResume": "Copy the session's resume command",
       "bar.shortcuts.esc": "Clear the search, then close",
       "bar.shortcuts.refresh": "Scan the sessions again",
       "bar.shortcuts.help": "This list",
@@ -95,6 +96,8 @@
       "action.explorer": "Explorer",
       "action.explorerTitle": "Open in Explorer",
       "action.copyPath": "Copy path",
+      "action.copyResume": "Copy the resume command (cd to the folder + resume)",
+      "action.command": "Command",
       "action.rename": "Rename",
       "action.remove": "Remove from the list",
 
@@ -913,6 +916,7 @@
       "bar.shortcuts.session": "Предишна / следваща сесия",
       "bar.shortcuts.project": "Предишен / следващ проект",
       "bar.shortcuts.open": "Отвори сесията",
+      "bar.shortcuts.copyResume": "Копирай командата за възобновяване на сесията",
       "bar.shortcuts.esc": "Изчисти търсенето, после затвори",
       "bar.shortcuts.refresh": "Сканирай сесиите наново",
       "bar.shortcuts.help": "Този списък",
@@ -987,6 +991,8 @@
       "action.explorer": "Explorer",
       "action.explorerTitle": "Отвори в Explorer",
       "action.copyPath": "Копирай пътя",
+      "action.copyResume": "Копирай командата за възобновяване (cd към папката + resume)",
+      "action.command": "Команда",
       "action.rename": "Преименувай",
       "action.remove": "Махни от списъка",
 

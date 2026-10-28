@@ -44,7 +44,8 @@ const ICONS = {
   download: '<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
   chart: '<path d="M4 20h16"/><path d="M7 16v-5M12 16V6M17 16v-8"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
-  power: '<path d="M12 3v8"/><path d="M6.6 6.5a8 8 0 1 0 10.8 0"/>'
+  power: '<path d="M12 3v8"/><path d="M6.6 6.5a8 8 0 1 0 10.8 0"/>',
+  command: '<rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="m9 12 2 2-2 2"/><path d="M13 16h2"/>'
 };
 const icon = name => `<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 I18N.applyI18n(); // the body is parsed by now, and the page's own script has not written into it yet
@@ -52,6 +53,10 @@ document.querySelectorAll("[data-icon]").forEach(el => { el.outerHTML = icon(el.
 
 // ---------- live status ----------
 const sessionKey = s => `${s.agent}:${s.id}`;
+// The line that resumes a session by hand, for PowerShell (what Windows Terminal opens): into its folder, then the
+// agent as main.js's agentCommand starts it.
+const RESUME_ARGS = { Claude: ["--resume"], Codex: ["resume"], OpenCode: ["--session"] };
+const resumeCommand = s => `cd '${String(s.cwd).replace(/'/g, "''")}'; ${s.agent.toLowerCase()} ${RESUME_ARGS[s.agent].join(" ")} ${s.id}`;
 const STALE_MS = 10 * 60 * 1000;
 const lastSign = l => Math.max(l.activityAt || 0, l.statusAt || 0);
 const isStale = l => l.status === "busy" && Date.now() - lastSign(l) > STALE_MS;
