@@ -13,17 +13,27 @@
 // The logic is files.js (no DOM there; scripts/test-mobile-files.js runs it). The sheet, the folder dialog and the
 // viewer are .sheet-backdrop elements: the phone's Back closes them as it closes every sheet (main.js). Nothing is
 // asked on a timer except a running copy's progress.
+//
+// Above the list, in a folder of a computer that can sort: a search field (only the names that hold what is typed,
+// asked of the computer a moment after the typing stops; its x and Escape clear it) and the order (a sheet: name
+// A-Z / Z-A, newest / oldest, largest / smallest; folders stay first). The order is remembered on this phone; the
+// search is the folder's and goes when another folder is opened. Any order but the name's makes the computer look at
+// every entry before the first page, so neither is asked for by itself. A computer whose AgentDeck cannot sort yet
+// (no `total` in its answer) gets no such controls.
 // params: node; path - the folder to start in ("~": the home).
 import { t, errorText, formatTime, formatDate } from "../i18n.js";
 import { esc, baseName } from "../util.js";
 import { icon, iconBtn } from "../icons.js";
 import { header, wireBack } from "./parts.js";
 import { renderMarkdown } from "../markdown.js";
-import { createRemoteFiles, crumbs, entryPath, tapAction, actionsFor, bytesText, filesOutdated } from "../files.js";
+import { createRemoteFiles, crumbs, entryPath, tapAction, actionsFor, bytesText, filesOutdated, ORDERS, orderOf } from "../files.js";
 import { nativeFiles } from "../files-native.js";
 
 const LONG_MS = 500, MOVE_PX = 10;
 const HOME = "~";
+const ORDER_KEY = "agentdeck.files.order"; // the order chosen last (ORDERS key), on this phone only
+const FILTER_MS = 350;                       // the pause in typing after which the computer is asked
+const savedOrder = () => { try { return orderOf(localStorage.getItem(ORDER_KEY)); } catch { return orderOf(""); } };
 
 // A file's time in a row: the time today, the day this year, the date before.
 function when(ms) {
@@ -36,10 +46,14 @@ export function render(el, ctx, p) {
   const { store } = ctx, name = store.nodeName(p.node);
   const files = createRemoteFiles({ provider: store.provider, node: p.node, plugin: nativeFiles() });
   let left = false, folder = null, loading = false, error = null, gen = 0, task = null, wasOnline = null;
+  let order = savedOrder(), filter = "", filterTimer = 0;
   const overlays = new Set();
   el.classList.add("files");
   el.innerHTML = `${header(t("files.titleOn", { name }), { back: true, actions: `<button class="btn sm" data-act="upload" hidden>${icon("upload")}<span>${esc(t("files.upload"))}</span></button>` })}
     <nav class="files-crumbs" aria-label="${esc(t("files.where"))}"></nav>
+    <div class="files-tools" hidden><div class="searchbar files-search">${icon("search")}<input type="search" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${esc(t("files.filterPh"))}" aria-label="${esc(t("files.filterPh"))}">
+      ${iconBtn("x", t("files.filterClear"), 'data-act="unfilter" hidden')}</div>
+      <button class="btn sm files-order" data-act="order" aria-haspopup="dialog">${icon("sort")}<span></span></button></div>
     <main class="body files-list"></main>
     <div class="files-task" role="status" hidden><div class="task-text"><b></b><small></small><i class="task-bar"><i></i></i></div>
       <button class="btn sm" data-act="stop">${icon("stop")}<span>${esc(t("files.stop"))}</span></button></div>
@@ -47,17 +61,20 @@ export function render(el, ctx, p) {
   wireBack(el, ctx);
   const nav = el.querySelector(".files-crumbs"), body = el.querySelector(".files-list"), taskEl = el.querySelector(".files-task");
   const uploadBtn = el.querySelector("[data-act='upload']"), input = el.querySelector(".files-input");
+  const tools = el.querySelector(".files-tools"), search = tools.querySelector("input"), unfilter = tools.querySelector("[data-act='unfilter']"), orderBtn = tools.querySelector("[data-act='order']");
   const online = () => store.nodes().some(n => n.id === p.node && n.online);
   const info = () => store.node(p.node)?.info || null;
 
   // ---------- the list ----------
-  async function load(path, { start = false } = {}) {
+  // keep: the same folder in another order or with another search (else a search typed for the last folder goes).
+  async function load(path, { start = false, keep = false } = {}) {
     const my = ++gen;
+    if (!keep && filter) { filter = ""; search.value = ""; }
     loading = true;
     draw();
     try {
       if (!online()) throw Object.assign(new Error("offline"), { code: "offline" });
-      const f = await files.folder(path);
+      const f = await files.folder(path, { sort: order.sort, desc: order.desc, filter });
       if (left || my !== gen) return;
       folder = f;
       error = null;
@@ -75,7 +92,7 @@ export function render(el, ctx, p) {
     loading = false;
     draw();
   }
-  const reload = () => load(folder ? folder.path : p.path || HOME);
+  const reload = () => load(folder ? folder.path : p.path || HOME, { keep: true });
 
   function rowHtml(e, i) {
     const meta = [e.dir ? "" : bytesText(e.size), e.mtime ? when(e.mtime) : "", e.link ? t("files.link") : ""].filter(Boolean).join(" · ");
@@ -90,6 +107,10 @@ export function render(el, ctx, p) {
     const up = online();
     const outdated = filesOutdated({ info: info(), error });
     uploadBtn.hidden = !folder || !folder.path || !up || outdated;
+    tools.hidden = !folder?.path || !folder.sortable || !up || outdated;
+    orderBtn.querySelector("span").textContent = t(`files.order.${order.key}`);
+    orderBtn.setAttribute("aria-label", t("files.orderNow", { order: t(`files.order.${order.key}`) }));
+    unfilter.hidden = !search.value;
     nav.innerHTML = folder && !outdated
       ? [`<button class="crumb" data-path="" aria-label="${esc(t("files.drives"))}"${folder.path ? "" : ' aria-current="location"'}>${icon("computer")}</button>`,
         ...crumbs(folder.path, folder.sep).map((c, i, all) => `<i class="crumb-sep" aria-hidden="true">›</i><button class="crumb" data-path="${esc(c.path)}"${i === all.length - 1 ? ' aria-current="location"' : ""}>${esc(c.name)}</button>`)].join("")
@@ -101,7 +122,9 @@ export function render(el, ctx, p) {
     else if (loading) body.innerHTML = `<p class="empty"><i class="spinner accent"></i> ${esc(t("files.loading"))}</p>`;
     else if (!folder) body.innerHTML = note(errorText(error), `<div class="files-again"><button class="btn" data-act="retry">${esc(t("files.retry"))}</button><button class="btn" data-act="home">${icon("folder")}${esc(t("files.home"))}</button></div>`);
     else {
-      body.innerHTML = `${folder.entries.length ? `<div class="rows">${folder.entries.map(rowHtml).join("")}</div>` : `<p class="empty">${esc(t("files.empty"))}</p>`}
+      const searched = folder.order?.filter;
+      const head = searched && folder.entries.length ? `<p class="files-count">${esc(t("files.matches", { n: folder.total }))}</p>` : "";
+      body.innerHTML = `${head}${folder.entries.length ? `<div class="rows">${folder.entries.map(rowHtml).join("")}</div>` : `<p class="empty">${esc(searched ? t("files.noMatch", { filter: searched }) : t("files.empty"))}</p>`}
         ${folder.next ? `<button class="more-row" data-act="more">${esc(t("files.more"))}</button>` : ""}`;
     }
   }
@@ -113,6 +136,29 @@ export function render(el, ctx, p) {
       if (folder === at) { const top = body.scrollTop; draw(); body.scrollTop = top; }
     } catch (e) { if (!left) ctx.fail(e); b.disabled = false; }
   }
+
+  // ---------- the order and the search ----------
+  orderBtn.onclick = async () => {
+    const pick = await ctx.menu(ORDERS.map(o => ({ key: o.key, icon: o.key === order.key ? "check" : "sort", label: t(`files.order.${o.key}`), on: o.key === order.key })));
+    if (!pick || left || pick === order.key) return;
+    order = orderOf(pick);
+    try { localStorage.setItem(ORDER_KEY, order.key); } catch {}
+    if (folder) load(folder.path, { keep: true });
+  };
+  const searchNow = () => {
+    clearTimeout(filterTimer);
+    const next = search.value.trim();
+    unfilter.hidden = !search.value;
+    if (next === filter || !folder?.path) return;
+    filter = next;
+    load(folder.path, { keep: true });
+  };
+  search.addEventListener("input", () => { unfilter.hidden = !search.value; clearTimeout(filterTimer); filterTimer = setTimeout(searchNow, FILTER_MS); });
+  search.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); searchNow(); search.blur(); }
+    else if (e.key === "Escape" && search.value) { e.preventDefault(); e.stopPropagation(); search.value = ""; searchNow(); }
+  });
+  unfilter.onclick = () => { search.value = ""; searchNow(); search.focus(); };
 
   // ---------- one transfer at a time ----------
   // work({ signal, detach, onProgress }) -> its result, or null when it failed or was stopped (said in a toast).
@@ -419,6 +465,7 @@ export function render(el, ctx, p) {
 
   return () => {
     left = true;
+    clearTimeout(filterTimer);
     offChange();
     unpress();
     for (const close of [...overlays]) close();

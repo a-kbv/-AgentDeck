@@ -19,16 +19,24 @@
 //
 // createRemoteFiles({ provider, node, plugin }) - provider: request(node, method, params, { timeout }) and
 //   on("notify", fn) (provider-relay.js); plugin: the `Files` plugin, or null ->
-//   canDownload; folder(path) -> a Folder (below); download(path, name, opts) -> { file, shown, size };
+//   canDownload; folder(path, order?) -> a Folder (below; order: { sort, desc, filter } - ORDERS); download(path, name, opts) -> { file, shown, size } (opts.expect:
+//   { size, mtime } the file must still have - a file offered to the phone is the one its user agreed to take);
 //   openFile(path, name, opts) -> the same, opened in the system's viewer; preview(path, entry, opts) ->
 //   { kind: "text" | "markdown", text } | { kind: "image", type, blob }; upload(dir, sep, blob, name, opts) -> { path };
 //   rename(from, dir, sep, name, { dir, offer }) -> { path } | null; transfer(item, toDir, sep, opts) -> { path };
 //   mkdir(dir, sep, name) -> { path }; remove(path) -> { trashed }.
 //   opts: onProgress({ bytes, total, files? }), signal (an AbortSignal: Stop - "cancelled"). A copy also takes detach
 //   (an AbortSignal: stop following it, it goes on there - "detached").
-// A Folder: { path, parent, sep, home, entries, next } as files.list answers it ("" is the list of the roots, whose
-//   entries' names are their paths), and more() -> the entries of the next page; one page at a time, and an entry
-//   already listed is not listed again.
+// A Folder: { path, parent, sep, home, entries, next, total, sortable } as files.list answers it ("" is the list of the
+//   roots, whose entries' names are their paths), and more() -> the entries of the next page in the same order and
+//   filter; one page at a time, and an entry already listed is not listed again. total: the entries that match (null
+//   from a computer whose AgentDeck has no sorting yet - it answers name order whatever is asked: sortable false).
+//
+// A file a computer sends (docs/FILES.md 3.6): the computer can push nothing onto a phone, so it offers the file
+// ("files.offer" { offer, path, name, size, mtime }) and the phone pulls it with the same download. checkOffer(payload)
+// -> the offer as the phone shows it, or null; takeOffer({ provider, node, plugin, offer, save, onProgress, signal })
+// answers it ("files.answer") as the user chose and, on save, downloads it into Downloads - "accepted" first and nothing
+// read unless the computer took that, then "done" or "failed" with the code.
 import { toBase64, fromBase64 } from "./forward.js";
 
 export const CHUNK = 256 * 1024;              // bytes of one files.read / files.write (src/host/files.js CHUNK)
@@ -140,20 +148,47 @@ export function base64Bytes(data) {
   return data.length ? (data.length / 4) * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0) : 0;
 }
 
+// ---------- the order of a list ----------
+// The orders the phone offers (files.list sort / desc). Folders stay first in each; the name order is the host's own
+// and the only one that does not make it look at every entry before the first page.
+export const ORDERS = [
+  { key: "nameAsc", sort: "name", desc: false },
+  { key: "nameDesc", sort: "name", desc: true },
+  { key: "newest", sort: "mtime", desc: true },
+  { key: "oldest", sort: "mtime", desc: false },
+  { key: "largest", sort: "size", desc: true },
+  { key: "smallest", sort: "size", desc: false }
+];
+export const orderOf = key => ORDERS.find(o => o.key === key) || ORDERS[0];
+// What files.list is asked for besides the path: only what differs from the host's default (an older host sees no
+// field it does not know), never a filter longer than the host takes.
+export function listParams({ sort = "name", desc = false, filter = "" } = {}) {
+  const out = {};
+  if (sort !== "name") out.sort = sort;
+  if (desc) out.desc = true;
+  const f = String(filter || "").trim().slice(0, 200);
+  if (f) out.filter = f;
+  return out;
+}
+
 // ---------- the computer ----------
 export function createRemoteFiles({ provider, node, plugin = null }) {
   const call = (method, params, timeout = 30000) => provider.request(node, method, params, { timeout });
 
   // ---------- folders ----------
-  async function folder(path) {
-    const first = await call("files.list", { path });
+  // order: { sort, desc, filter } (listParams). A page's `next` is valid only with the same order and filter: a new
+  // order is a new folder() from the first page.
+  async function folder(path, order = {}) {
+    const asked = path ? listParams(order) : {};
+    const first = await call("files.list", { path, ...asked });
     const seen = new Set(first.entries.map(e => e.name));
     let busy = null;
-    const f = { path: first.path, parent: first.parent, sep: first.sep, home: first.home, entries: [...first.entries], next: first.next };
+    const sortable = Number.isInteger(first.total);
+    const f = { path: first.path, parent: first.parent, sep: first.sep, home: first.home, entries: [...first.entries], next: first.next, total: sortable ? first.total : null, sortable, order: asked };
     // The next page; a second tap while one is on its way gets the same answer, not the page twice.
     f.more = () => (busy ||= (async () => {
       if (!f.next) return [];
-      const page = await call("files.list", { path: f.path, after: f.next });
+      const page = await call("files.list", { path: f.path, after: f.next, ...asked });
       const fresh = page.entries.filter(e => !seen.has(e.name));
       for (const e of fresh) seen.add(e.name);
       f.entries.push(...fresh);
@@ -168,13 +203,16 @@ export function createRemoteFiles({ provider, node, plugin = null }) {
   // next is asked for. The first answer's size and time go back with every later request: the host refuses a file that
   // changed meanwhile (`changed`). first(answer): before the first piece is taken (a plugin file is begun with the
   // size). max: a file bigger than this is refused before anything is taken.
-  async function readPieces(path, take, { onProgress, signal, max = Infinity, first } = {}) {
-    let pos = 0, size, mtime;
+  // expect: { size, mtime } the first piece already asks with (a file that is no longer that one: `changed`).
+  async function readPieces(path, take, { onProgress, signal, max = Infinity, first, expect } = {}) {
+    let pos = 0, size, mtime, begun = false;
     for (;;) {
       stopped(signal);
-      const r = await call("files.read", size === undefined ? { path, pos, len: CHUNK } : { path, pos, len: CHUNK, size, mtime }, PIECE_MS);
+      const known = begun ? { size, mtime } : expect ? { size: expect.size, mtime: expect.mtime } : null;
+      const r = await call("files.read", known ? { path, pos, len: CHUNK, ...known } : { path, pos, len: CHUNK }, PIECE_MS);
       stopped(signal);
-      if (size === undefined) {
+      if (!begun) {
+        begun = true;
         ({ size, mtime } = r);
         if (size > max) throw failure("tooBigToView");
         await first?.(r);
@@ -196,12 +234,12 @@ export function createRemoteFiles({ provider, node, plugin = null }) {
   // that many bytes - so a file that is not there leaves nothing here; it is cancelled when anything fails or Stop is
   // pressed, also when finish itself is refused (an iPhone's "Save to Files" sheet dismissed answers `cancelled`, with
   // the file still there to remove).
-  async function download(path, name, { keep = true, onProgress, signal } = {}) {
+  async function download(path, name, { keep = true, onProgress, signal, expect } = {}) {
     if (!plugin) throw failure("needsApp");
     let file = null;
     try {
       const { size } = await readPieces(path, data => plugin.write({ file, data }), {
-        onProgress, signal,
+        onProgress, signal, expect,
         first: async r => { file = (await plugin.begin({ name, size: r.size, keep })).file; }
       });
       stopped(signal);
@@ -356,4 +394,48 @@ export function createRemoteFiles({ provider, node, plugin = null }) {
   }
 
   return { canDownload: Boolean(plugin), folder, download, openFile, preview, upload, rename, mkdir, remove, transfer };
+}
+
+// ---------- a file a computer sends ----------
+const OFFER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ANSWER_MS = 15000;
+// The event's payload, checked: what the prompt shows must be a plain name and a real size, whatever a computer sent.
+// The computer's name is not in it - the phone takes that from its own link. -> { offer, path, name, size, mtime } | null
+export function checkOffer(p) {
+  if (!p || typeof p !== "object") return null;
+  if (typeof p.offer !== "string" || !OFFER_ID.test(p.offer)) return null;
+  if (typeof p.path !== "string" || !p.path || p.path.length > 4096 || p.path.includes("\0")) return null;
+  if (!Number.isSafeInteger(p.size) || p.size < 0 || (p.mtime !== undefined && !Number.isSafeInteger(p.mtime))) return null;
+  let name;
+  try { name = checkName(p.name); } catch { return null; }
+  if (name !== p.name || /[\x00-\x1f\x7f]/.test(name)) return null;
+  return { offer: p.offer, path: p.path, name, size: p.size, mtime: p.mtime };
+}
+
+// The user's choice on an offer of computer `node`: save false - "declined", nothing read; no plugin - "failed" with
+// needsApp, nothing read (and needsApp thrown); else "accepted", and only when the computer took it (an offer withdrawn
+// or expired there is refused: that is thrown, nothing read) the download into Downloads, with the size and time the
+// offer named - a file that changed since is refused - then "done", or "failed" with the code of what went wrong (Stop:
+// cancelled). The answers after the choice are best effort: a link that went meanwhile loses them, the computer's
+// row then says the phone went away.
+// -> { state: "declined" } | { state: "done", file, shown, size }
+export async function takeOffer({ provider, node, plugin = null, offer, save, onProgress, signal }) {
+  const answer = (state, error) => provider.request(node, "files.answer", error ? { offer: offer.offer, state, error } : { offer: offer.offer, state }, { timeout: ANSWER_MS });
+  if (!save) {
+    await answer("declined").catch(() => {});
+    return { state: "declined" };
+  }
+  if (!plugin) {
+    await answer("failed", "needsApp").catch(() => {});
+    throw failure("needsApp");
+  }
+  await answer("accepted");
+  try {
+    const got = await createRemoteFiles({ provider, node, plugin }).download(offer.path, offer.name, { onProgress, signal, expect: { size: offer.size, mtime: offer.mtime } });
+    await answer("done").catch(() => {});
+    return { state: "done", ...got };
+  } catch (e) {
+    await answer("failed", typeof e?.code === "string" && /^[A-Za-z0-9]{1,40}$/.test(e.code) ? e.code : "fileFailed").catch(() => {});
+    throw e;
+  }
 }

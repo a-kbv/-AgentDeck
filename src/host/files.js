@@ -113,7 +113,7 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
   }
   const order = (a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.key < b.key ? -1 : a.key > b.key ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
-  // {path, after?, limit?} -> { path, parent, sep, home, entries, next }: folders first, then by name; `next` is
+  // {path, after?, limit?, sort?, desc?, filter?} -> { path, parent, sep, home, entries, next, total }: folders first, then by name; `next` is
   // given back as `after` for the page that follows ("" when this was the last). parent: "" above a root (the roots
   // themselves), null for the roots.
   async function list(p) {
@@ -125,11 +125,30 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
     const dir = whole(p.path);
     const after = p?.after === undefined || p.after === "" ? null : String(p.after).slice(0, 600);
     const found = await fsp.readdir(dir, { withFileTypes: true }).catch(failed);
-    const all = await Promise.all(found.map(async d => {
+    // sort: "name" (as it always was), "mtime" or "size"; desc: the other way round; filter: only names that hold
+    // that text, whatever the letters' case. Folders stay first in every order.
+    const sort = p?.sort === undefined ? "name" : p.sort, desc = Boolean(p?.desc);
+    if (!["name", "mtime", "size"].includes(sort)) fail("invalidData");
+    const filter = p?.filter === undefined ? "" : String(p.filter).slice(0, 200).toLowerCase();
+    let all = await Promise.all(found.map(async d => {
       // Whether a link leads to a folder decides where it is sorted; only links are looked at for it.
       const isDir = d.isSymbolicLink() ? await fsp.stat(path.join(dir, d.name)).then(s => s.isDirectory(), () => false) : d.isDirectory();
       return { name: d.name, dir: isDir, key: d.name.toLowerCase() };
     }));
+    if (filter) all = all.filter(x => x.key.includes(filter));
+    if (sort !== "name" || desc) {
+      // Any other order needs every entry looked at before the first page can be cut; the place in it is a count,
+      // given as "#n" (a folder that changes between two pages may then repeat or miss a row - the name order does not).
+      const seen = (await Promise.all(all.map(x => entry(path.join(dir, x.name), x.name).catch(() => null)))).filter(Boolean);
+      const by = sort === "name" ? (a, b) => order({ ...a, key: a.name.toLowerCase() }, { ...b, key: b.name.toLowerCase() }) : (a, b) => a[sort] - b[sort] || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+      seen.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : desc ? by(b, a) : by(a, b)));
+      const start = after === null ? 0 : int(Number(after.slice(1)), 0, seen.length);
+      if (after !== null && after[0] !== "#") fail("invalidData");
+      return {
+        path: dir, parent: isRoot(dir) ? "" : path.dirname(dir), sep: path.sep, home, entries: seen.slice(start, start + limit),
+        next: start + limit < seen.length ? "#" + (start + limit) : "", total: seen.length
+      };
+    }
     all.sort(order);
     let from = 0;
     if (after !== null) {
@@ -143,7 +162,7 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
     const last = page[page.length - 1];
     return {
       path: dir, parent: isRoot(dir) ? "" : path.dirname(dir), sep: path.sep, home, entries,
-      next: from + limit < all.length && last ? (last.dir ? "d" : "f") + last.name : ""
+      next: from + limit < all.length && last ? (last.dir ? "d" : "f") + last.name : "", total: all.length
     };
   }
   const stat = async p => { const file = whole(p?.path); return { path: file, ...(await entry(file)) }; };

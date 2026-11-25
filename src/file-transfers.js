@@ -15,12 +15,17 @@
 // Links to folders inside it are not followed - this side cannot see where one leads, so one to a parent would go
 // round for ever - and are counted as skipped, with names the target's file system cannot hold.
 //
-// createFileTransfers({ links, local, nameOf, onChange }) - links: mesh/links.js; local: this computer's files
-// (host/files.js); nameOf(node): a computer's name ("" this one); onChange(list): the queue changed (called at most
-// every CHANGE_MS while bytes move).
+// A file of this computer sent to a phone is a row too, but nothing moves from here: the phone is offered the file and
+// pulls it itself (host/file-offers.js, docs/FILES.md 3.6). Its row follows the phone's answers: waiting for it, no
+// answer (yet), saving on the phone, done, declined, failed, or expired; Stop takes back an offer not taken yet.
+//
+// createFileTransfers({ links, local, offers, nameOf, onChange }) - links: mesh/links.js; local: this computer's files
+// (host/files.js); offers: this computer's offers to phones (mesh/serve.js offers); nameOf(node): a computer's or a
+// phone's name ("" this one); onChange(list): the queue changed (called at most every CHANGE_MS while bytes move).
 //   side(node) -> { call(method, params) }: one side's files.* ("delete" is host/files.js remove).
 //   send({ from: { node, path }, to: { node, folder } }) -> the row: a file or a folder (with all in it) into a folder.
 //   copy({ node, from, to, move }) -> the row: a copy (or a move across volumes) on one computer, done there.
+//   offer({ node, path }) -> the row: a file of this computer offered to the phone `node` (linked now).
 //   readAll(node, path, max, write?) -> Buffer, or the bytes handed to write(buf) a piece at a time: a whole file,
 //     refused ("tooBig") above max bytes.
 //   stop(id), clear() (the finished rows go), list(), linkDown(node), dispose().
@@ -42,6 +47,10 @@ const LOCAL = {
 };
 const fail = code => { throw new HostError(code); };
 const isObj = v => v !== null && typeof v === "object" && !Array.isArray(v);
+// A row that has not ended: it is not cleared, and Stop applies to it.
+const LIVE = new Set(["queued", "running", "waiting", "noAnswer"]);
+// An offer's state (host/file-offers.js) as its row's: noAnswer is still waiting, only the words differ.
+const OFFER_STATE = { accepted: "running", done: "done", declined: "declined", failed: "failed", expired: "expired", withdrawn: "stopped" };
 // A path on that side: its own separator, whatever this computer's is (the other one may be Linux).
 const join = (sep, dir, name) => (dir.endsWith(sep) ? dir + name : dir + sep + name);
 // A name the other side listed, as a name inside a folder here: never a path, never one that leaves the folder. On a
@@ -51,7 +60,7 @@ function goodName(name, sep) {
   return sep !== "\\" || !/[<>:"|?*\x00-\x1f]|[. ]$/.test(name);
 }
 
-function createFileTransfers({ links, local, nameOf = () => "", onChange = () => {} }) {
+function createFileTransfers({ links, local, offers = null, nameOf = () => "", onChange = () => {} }) {
   const rows = new Map(); // id -> row, in the order they were made
   const waiting = [];     // transfers not begun yet
   let running = null, disposed = false, changeTimer = null;
@@ -78,7 +87,7 @@ function createFileTransfers({ links, local, nameOf = () => "", onChange = () =>
   function addRow(r) {
     rows.set(r.id, r);
     // The oldest finished rows go when there are too many.
-    const done = [...rows.values()].filter(x => x.state !== "queued" && x.state !== "running");
+    const done = [...rows.values()].filter(x => !LIVE.has(x.state));
     for (const x of done.slice(0, Math.max(0, rows.size - ROWS_KEPT))) rows.delete(x.id);
   }
   function end(r, state, e) {
@@ -255,10 +264,31 @@ function createFileTransfers({ links, local, nameOf = () => "", onChange = () =>
     return write ? st.size : Buffer.concat(parts);
   }
 
+  // ---------- a file offered to a phone ----------
+  async function offer({ node, path }) {
+    if (!offers) fail("unknownMethod");
+    const o = await offers.make(node, { path });
+    const r = newRow("offer", { node: "", path: o.path }, { node, folder: "" }, o.name);
+    Object.assign(r, { offer: o.offer, state: "waiting", total: o.size, count: 1 });
+    addRow(r);
+    changed(true);
+    return view(r);
+  }
+  offers?.on("change", o => {
+    const r = [...rows.values()].find(x => x.offer === o.offer);
+    if (!r) return;
+    r.state = o.state === "waiting" ? (o.noAnswer ? "noAnswer" : "waiting") : OFFER_STATE[o.state] || "failed";
+    r.error = o.state === "failed" ? o.error || "fileFailed" : "";
+    if (r.state === "done") { r.bytes = r.total; r.files = 1; }
+    changed(true);
+  });
+
   // ---------- stopping ----------
   function stop(id) {
     const r = rows.get(id);
     if (!r) return false;
+    // An offer is taken back while the phone has not taken it; once it has, the phone's own Stop is the one.
+    if (r.kind === "offer") return offers.withdraw(r.offer);
     if (r.state === "queued" && r.kind === "transfer") {
       waiting.splice(waiting.indexOf(r), 1);
       end(r, "stopped");
@@ -269,7 +299,7 @@ function createFileTransfers({ links, local, nameOf = () => "", onChange = () =>
     return true;
   }
   function clear() {
-    for (const r of [...rows.values()]) if (r.state !== "queued" && r.state !== "running") rows.delete(r.id);
+    for (const r of [...rows.values()]) if (!LIVE.has(r.state)) rows.delete(r.id);
     changed(true);
     return list();
   }
@@ -295,7 +325,7 @@ function createFileTransfers({ links, local, nameOf = () => "", onChange = () =>
     clearTimeout(changeTimer);
   }
 
-  return { side, send, copy, readAll, stop, clear, list, linkDown, dispose };
+  return { side, send, copy, offer, readAll, stop, clear, list, linkDown, dispose };
 }
 
 module.exports = { createFileTransfers, goodName, join, CHUNK };

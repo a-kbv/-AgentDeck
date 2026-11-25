@@ -121,7 +121,7 @@ async function main() {
       sessions: { get: () => data, data: async () => data, registry: { read: () => ({ projects: [], groups: [], removed: [] }), save() {} } } };
 
     const chrome = await launch(await chromePath(), path.join(root, "chrome")); browsers.push(chrome);
-    await withPhone(createBrowser({ discover: async () => [] }), async ({ host, relay }) => {
+    await withPhone(createBrowser({ discover: async () => [] }), async ({ host, relay, served, phone: rigPhone }) => {
       // The same pairing text the desktop's QR code carries: the relay and this computer.
       const entry = inv => ({ id: inv.id, k: pairCode.hexToKey(inv.key), c: inv.code, n: inv.name, t: inv.kind });
       const { t: _kind, ...r } = entry(await host.call(relay.self().id, "pair.invite"));
@@ -238,6 +238,32 @@ async function main() {
       await page.until("document.querySelector('.node-head [data-act=files]')", "the computer's Files button");
       await page.fits("computer screen");
       await page.shot("files-live-node.png");
+
+      // ---------- a file the computer sends, on a screen other than Files (docs/FILES.md 3.6) ----------
+      // The page's phone is the mobile peer that is not the rig's own; the computer offers it a file of its project.
+      const pagePhone = host.nodes().find(n => n.kind === "mobile" && n.id !== rigPhone.id && n.status === "online");
+      assert.ok(pagePhone, "the page's phone is linked to the computer");
+      const offerStates = new Map();
+      served.offers.on("change", v => offerStates.set(v.offer, v));
+      const notes = Buffer.byteLength(NOTES);
+      const askOf = async () => { await page.until("document.querySelector('.offer-ask .sheet p')", "the prompt for the sent file"); return page.text("document.querySelector('.offer-ask .sheet p')"); };
+      let sentOffer = await served.offers.make(pagePhone.id, { path: path.join(fx.project, "notes.txt") });
+      assert.equal(await askOf(), `${NODE_NAME} sends you “notes.txt” (${notes} B). Save it in Downloads on this phone?`, "the prompt names the computer, the file and its size");
+      assert.ok(await page.has("document.querySelector('.node-head [data-act=files]')"), "over the computer's screen, not the Files screen");
+      assert.deepEqual(await page.eval("[...document.querySelectorAll('.offer-ask .sheet-actions .btn')].map(b => b.textContent.trim())"), ["Not now", "Save"]);
+      await page.fits("sent file prompt");
+      await page.shot("files-live-offer.png");
+      await page.tap("document.querySelector('.offer-ask [data-v=\"0\"]')");
+      await waitFor(() => offerStates.get(sentOffer.offer)?.state === "declined", "Not now tells the computer: declined");
+      assert.equal(await page.has("document.querySelector('.offer-ask')"), false, "the prompt is gone");
+      // Save in a browser: no Files plugin - the app must be updated, and the computer hears that it failed.
+      sentOffer = await served.offers.make(pagePhone.id, { path: path.join(fx.project, "notes.txt") });
+      await askOf();
+      await page.tap("document.querySelector('.offer-ask [data-v=\"1\"]')");
+      await page.toast("Update this app to save files sent from a computer", "Save without the plugin");
+      await waitFor(() => offerStates.get(sentOffer.offer)?.state === "failed", "Save without the plugin tells the computer: failed");
+      assert.equal(offerStates.get(sentOffer.offer).error, "needsApp");
+      assert.equal(await page.has("document.querySelector('.offer-task')"), false, "nothing is being saved");
       await page.tap("document.querySelector('.node-head [data-act=files]')");
       await page.until("__row('harbor-app')", "home folder listed");
       assert.equal(await page.text("document.querySelector('#app header.top h1')"), `Files · ${NODE_NAME}`);
@@ -288,6 +314,41 @@ async function main() {
       await page.tap("[...document.querySelectorAll('.files-crumbs .crumb')].find(b => b.textContent === 'harbor-app')");
       await page.until("__row('notes.txt')", "back in the project");
 
+      // ---------- the order and the search ----------
+      // manual.pdf is made the newest file on the host; "Newest first" must bring it to the top of the files.
+      const topFile = "__rows().find(x => !x.dir)?.name";
+      const later = new Date(Date.now() + 5 * 60000);
+      await fsp.utimes(path.join(fx.project, "manual.pdf"), later, later);
+      assert.ok(await page.has("__vis(document.querySelector('.files-tools'))"), "the search and the order above the list");
+      assert.equal(await page.text("document.querySelector('.files-tools [data-act=order] span')"), "Name A–Z");
+      assert.notEqual(await page.eval(topFile), "manual.pdf");
+      await page.tap("document.querySelector('.files-tools [data-act=order]')");
+      await page.until("document.querySelector('.sheet.menu')", "the order's sheet");
+      assert.deepEqual(await page.eval("[...document.querySelectorAll('.sheet.menu .menu-label')].map(x => x.textContent)"),
+        ["Name A–Z", "Name Z–A", "Newest first", "Oldest first", "Largest first", "Smallest first"]);
+      await page.fits("order sheet");
+      await page.shot("files-live-order.png");
+      await page.tap("[...document.querySelectorAll('.sheet.menu .menu-item')].find(b => b.textContent.trim() === 'Newest first')");
+      await page.until(`${topFile} === "manual.pdf"`, "newest first: manual.pdf on top of the files");
+      assert.ok((await page.eval("__rows()")).slice(0, 7).every(x => x.dir), "folders still first");
+      assert.equal(await page.text("document.querySelector('.files-tools [data-act=order] span')"), "Newest first");
+      assert.equal(await page.eval("localStorage.getItem('agentdeck.files.order')"), "newest", "the order is remembered on the phone");
+      // The search: typed, asked a moment later, only the matches; its x clears it.
+      await page.tap("document.querySelector('.files-tools input')");
+      await page.type("NOTE");
+      await page.until("__rows().length === 1 && __rows()[0].name === 'notes.txt'", "only the names with 'note'");
+      assert.equal(await page.text("document.querySelector('.files-count')"), "1 matching");
+      await page.fits("filtered list");
+      await page.shot("files-live-filter.png");
+      await page.tap("document.querySelector('.files-tools [data-act=unfilter]')");
+      await page.until("__row('app-release.apk') && __rows().length > 10", "the search cleared: all again");
+      assert.equal(await page.eval("document.querySelector('.files-tools input').value"), "");
+      // Back to the name order for the rest of the steps.
+      await page.tap("document.querySelector('.files-tools [data-act=order]')");
+      await page.until("document.querySelector('.sheet.menu')", "the order's sheet again");
+      await page.tap("[...document.querySelectorAll('.sheet.menu .menu-item')].find(b => b.textContent.trim() === 'Name A–Z')");
+      await page.until(`${topFile} !== "manual.pdf" && !document.querySelector('.sheet-backdrop')`, "name order again");
+
       // ---------- looking at files ----------
       await page.tap("__row('notes.txt').querySelector('.frow-open')");
       await page.until("document.querySelector('.files-viewer .viewer-text')", "text viewer");
@@ -323,6 +384,18 @@ async function main() {
       await page.tap("__row('app-release.apk').querySelector('.frow-open')");
       await page.toast("Update this app to download files", "other file tapped");
       assert.equal(await page.has("document.querySelector('.sheet-backdrop')"), false, "no download question without the plugin");
+
+      // ---------- a sent file while the Files screen is open, and while a sheet is open there ----------
+      await page.hold("__row('notes.txt').querySelector('.frow-open')");
+      await page.until("document.querySelector('.sheet.menu')", "a sheet is open");
+      const third = await served.offers.make(pagePhone.id, { path: path.join(fx.project, "README.md") });
+      await sleep(600);
+      assert.equal(await page.has("document.querySelector('.offer-ask')"), false, "the prompt does not stack on an open sheet");
+      await page.eval("history.back()");
+      await page.until("document.querySelector('.offer-ask .sheet p')?.textContent.includes('README.md')", "the prompt once the sheet closed");
+      assert.ok(await page.has("__row('notes.txt')"), "over the Files screen");
+      await page.tap("document.querySelector('.offer-ask [data-v=\"0\"]')");
+      await waitFor(() => offerStates.get(third.offer)?.state === "declined", "declined from the Files screen");
 
       // ---------- a long press: the sheet ----------
       await page.hold("__row('notes.txt').querySelector('.frow-open')");
@@ -539,8 +612,8 @@ async function main() {
       await chrome.control.send("Target.closeTarget", { targetId: bg.targetId });
       assert.deepEqual(errors, [], "no page errors");
     }, { host: hostOpts });
-    console.log("mobile files live: the real phone app in a test Chrome (390x844, touch) paired through an encrypted relay with a served host: Files from a computer and from a session; folders first with hidden ones; breadcrumb; 620 entries in two pages; text, markdown and picture viewers; no-plugin download/PDF note; long-press sheet; rename with \"(2)\"; copy and move through the folder dialog with New folder; delete for good with its confirmation; an upload stopped half-way leaving nothing, two uploads compared byte for byte; the drives without actions; English and Bulgarian; no page errors");
-    console.log("Screenshots: .tmp/files-live-{node,list,preview,image,sheet,chooser,new-folder,delete,delete-long,toast-long,progress,session,list-bg,sheet-bg}.png (synthetic files only)");
+    console.log("mobile files live: the real phone app in a test Chrome (390x844, touch) paired through an encrypted relay with a served host: Files from a computer and from a session; Newest first and a search by name with its clear; a file the computer sends asked for on the computer's screen and on Files (not over an open sheet), Not now -> declined, Save without the plugin -> \"update the app\" and failed; folders first with hidden ones; breadcrumb; 620 entries in two pages; text, markdown and picture viewers; no-plugin download/PDF note; long-press sheet; rename with \"(2)\"; copy and move through the folder dialog with New folder; delete for good with its confirmation; an upload stopped half-way leaving nothing, two uploads compared byte for byte; the drives without actions; English and Bulgarian; no page errors");
+    console.log("Screenshots: .tmp/files-live-{node,offer,order,filter,list,preview,image,sheet,chooser,new-folder,delete,delete-long,toast-long,progress,session,list-bg,sheet-bg}.png (synthetic files only)");
   } catch (e) {
     // What the phone showed when it failed: a screenshot and its text.
     watching = false;

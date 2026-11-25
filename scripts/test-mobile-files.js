@@ -22,7 +22,13 @@
 // followed no longer goes on there, new folders, delete; a long folder a page at a time with every entry once, also
 // when "load more" is pressed twice at once; text, markdown and a picture looked at, a text over the cap refused before
 // a byte is read; a PDF opened through the plugin; without the plugin nothing is downloaded and the screen's choices
-// say so; an older computer ("update it there"); the pure helpers (paths, names, kinds, the breadcrumb).
+// say so; an older computer ("update it there"); the pure helpers (paths, names, kinds, the breadcrumb). A file the
+// computer sends (docs/FILES.md 3.6, takeOffer): saved byte for byte with "accepted" told before anything is read and
+// "done" after; Not now - "declined", nothing read; no plugin - "failed" needsApp, nothing read; a file that changed
+// on the way, or since it was offered - "failed" changed, nothing on the phone; an offer taken back - nothing read;
+// what the event may carry (checkOffer). The order and the search (files.list sort / desc / filter): the six orders
+// with folders first, a search by name whatever the case, paging under another order (every entry once, the same order
+// asked for each page), a new order starting from the first page, a computer without `total` not taken for sorting.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const fsp = fs.promises;
@@ -183,7 +189,7 @@ async function partsIn(dir) {
     assert.equal(F.filesOutdated({}), false, "not known yet is not outdated");
     console.log("ok: paths, names, kinds, the breadcrumb, sizes, an older computer");
 
-    await withPhone({ dispose() {}, drop() {} }, async ({ phone, host }) => {
+    await withPhone({ dispose() {}, drop() {} }, async ({ phone, host, served }) => {
       const id = host.self().id;
       const net = watched(phone);
       const plugin = fakePlugin(phoneDir);
@@ -365,6 +371,63 @@ async function partsIn(dir) {
       assert.ok(long.entries.slice(0, 20).every(e => e.dir), "folders first");
       console.log(`ok: ${names.length} entries a page at a time, none twice, none left out`);
 
+      // ---------- the order and the search (files.list sort / desc / filter) ----------
+      const ord = at("ordered");
+      await fsp.mkdir(path.join(ord, "Zeta"), { recursive: true });
+      await fsp.mkdir(path.join(ord, "alpha"));
+      const day = 86400000, base = Date.now() - 30 * day;
+      const made = [["b-middle.txt", 300, 2], ["A-old.log", 10, 1], ["c-new.bin", 2000, 5], ["Lab notes.md", 50, 3], ["d-tiny.txt", 1, 4]];
+      for (const [n, size, d] of made) {
+        await fsp.writeFile(path.join(ord, n), Buffer.alloc(size, 65));
+        const when = new Date(base + d * day);
+        await fsp.utimes(path.join(ord, n), when, when);
+      }
+      const namesOf = async key => (await files.folder(ord, F.orderOf(key))).entries.map(e => e.name);
+      const dirsFirst = ["alpha", "Zeta"];
+      assert.deepEqual(await namesOf("nameAsc"), [...dirsFirst, "A-old.log", "b-middle.txt", "c-new.bin", "d-tiny.txt", "Lab notes.md"], "name A-Z, folders first");
+      assert.deepEqual((await namesOf("nameDesc")).slice(2), ["Lab notes.md", "d-tiny.txt", "c-new.bin", "b-middle.txt", "A-old.log"], "name Z-A");
+      assert.deepEqual((await namesOf("nameDesc")).slice(0, 2).every(n => dirsFirst.includes(n)), true, "folders first in every order");
+      assert.deepEqual((await namesOf("newest")).slice(2), ["c-new.bin", "d-tiny.txt", "Lab notes.md", "b-middle.txt", "A-old.log"], "newest first");
+      assert.deepEqual((await namesOf("oldest")).slice(2), ["A-old.log", "b-middle.txt", "Lab notes.md", "d-tiny.txt", "c-new.bin"], "oldest first");
+      assert.deepEqual((await namesOf("largest")).slice(2), ["c-new.bin", "b-middle.txt", "Lab notes.md", "A-old.log", "d-tiny.txt"], "largest first");
+      assert.deepEqual((await namesOf("smallest")).slice(2), ["d-tiny.txt", "A-old.log", "Lab notes.md", "b-middle.txt", "c-new.bin"], "smallest first");
+      const found = await files.folder(ord, { ...F.orderOf("newest"), filter: "LA" });
+      assert.deepEqual(found.entries.map(e => e.name), ["Lab notes.md"], "only the names that hold the text, whatever the case");
+      assert.equal(found.total, 1);
+      assert.deepEqual((await files.folder(ord, { filter: "zE" })).entries.map(e => e.name), ["Zeta"], "a folder is found too");
+      assert.equal(found.sortable, true);
+      assert.deepEqual((await files.folder(ord, { filter: "nothing-like-it" })).entries, [], "a search that matches nothing lists nothing");
+      assert.deepEqual(F.listParams({ sort: "name", desc: false, filter: "  " }), {}, "the default order asks for nothing new");
+      // Paging under another order: every entry once, in that order, the same order and filter asked for each page.
+      net.reset();
+      const bySize = await files.folder(many, F.orderOf("largest"));
+      assert.ok(bySize.next.startsWith("#") && bySize.entries.length < names.length, "a page, with the host's count cursor");
+      while (bySize.next) await bySize.more();
+      const lists = net.calls.filter(c => c.method === "files.list");
+      assert.ok(lists.every(c => c.params.sort === "size" && c.params.desc === true), "every page asks for the same order");
+      assert.equal(lists[0].params.after, undefined, "a new order starts at the first page");
+      assert.deepEqual(lists.slice(1).map(c => c.params.after), lists.slice(1).map((_, i) => `#${(i + 1) * 500}`), "and each next page goes on from the last");
+      assert.equal(new Set(bySize.entries.map(e => e.name)).size, names.length, "no entry twice");
+      const filesOnly = bySize.entries.filter(e => !e.dir);
+      assert.ok(bySize.entries.slice(0, 20).every(e => e.dir), "folders first");
+      assert.ok(filesOnly.every((e, i) => !i || filesOnly[i - 1].size >= e.size), "largest first across the pages");
+      const filtered = await files.folder(many, { ...F.orderOf("nameDesc"), filter: "hidden" });
+      while (filtered.next) await filtered.more();
+      assert.equal(filtered.entries.length, names.filter(n => n.includes("hidden")).length);
+      assert.equal(filtered.total, filtered.entries.length, "the total is the matching entries");
+      // Changing the order mid-way starts again: the page after the first is not asked with the old cursor.
+      net.reset();
+      const byName = await files.folder(many, F.orderOf("nameAsc"));
+      assert.equal(net.calls.at(-1).params.after, undefined);
+      await byName.more();
+      assert.ok(!net.calls.at(-1).params.after.startsWith("#"), "the name order keeps the host's name cursor");
+      // A computer that cannot sort yet answers name order and no total: no sorting is offered there.
+      const oldList = createRemoteFiles({ provider: { request: (n, m, p) => phone.request(n, m, { path: p.path }).then(r => { delete r.total; return r; }), on: () => () => {} }, node: id, plugin });
+      const plain = await oldList.folder(ord, F.orderOf("newest"));
+      assert.equal(plain.sortable, false);
+      assert.equal(plain.total, null);
+      console.log("ok: six orders (folders first), a search by name, paging under another order, a new order restarts, a computer that cannot sort");
+
       // Stop on a copy: cancelled there, nothing of it left, the source as it was.
       const halted = new AbortController();
       await assert.rejects(files.transfer({ path: many, name: "many", dir: true }, act, listing.sep, { signal: halted.signal, onProgress: () => halted.abort() }), code("cancelled"));
@@ -417,6 +480,85 @@ async function partsIn(dir) {
       assert.equal((await bare.preview(at("notes.txt"), entry("notes.txt"))).text, text, "text is looked at without the plugin");
       assert.ok((await fsp.readFile((await bare.upload(up, view.sep, new Blob([body]), "bare.bin")).path)).equals(body), "and uploads work");
       console.log("ok: without the plugin nothing is downloaded and the choices say so; text and uploads still work");
+
+      // ---------- a file the computer sends (docs/FILES.md 3.6) ----------
+      // The host offers (served.offers.make), the phone hears it as a "notify", and takeOffer answers and pulls it.
+      const heard = [];
+      const offOffers = phone.on("notify", n => { if (n.event === "files.offer") heard.push(n); });
+      const answers = () => net.calls.filter(c => c.method === "files.answer").map(c => c.params.error ? `${c.params.state}:${c.params.error}` : c.params.state);
+      const offer = async file => {
+        const before = heard.length;
+        const made = await served.offers.make(phone.id, { path: file });
+        await waitFor(() => heard.length > before, "the offer reaches the phone");
+        const o = F.checkOffer(heard.at(-1).payload);
+        assert.ok(o, "the offer the host sends passes the phone's check");
+        assert.equal(o.offer, made.offer);
+        assert.equal(heard.at(-1).node, id, "from the computer it was made on");
+        net.reset();
+        return o;
+      };
+      const sentBytes = crypto.randomBytes(MB + 200 * KB + 3);
+      const report = at("report.bin");
+      await fsp.writeFile(report, sentBytes);
+      // Saved: accepted, the file whole into Downloads, then done.
+      let o = await offer(report);
+      const seenOffer = [];
+      const kept = await F.takeOffer({ provider: net, node: id, plugin, offer: o, save: true, onProgress: p => seenOffer.push(p) });
+      assert.equal(kept.state, "done");
+      assert.ok((await fsp.readFile(path.join(phoneDir, "Downloads", kept.shown))).equals(sentBytes), "the offered file is in Downloads, byte for byte");
+      assert.deepEqual(answers(), ["accepted", "done"], "accepted before anything is read, done after");
+      assert.ok(net.calls.findIndex(c => c.method === "files.answer") < net.calls.findIndex(c => c.method === "files.read"), "nothing is read before the computer took the answer");
+      assert.ok(reads(report).every(c => c.params.size === sentBytes.length && c.params.mtime === o.mtime), "every piece asks for the file the offer named");
+      assert.deepEqual(seenOffer.at(-1), { bytes: sentBytes.length, total: sentBytes.length });
+      assert.equal(served.offers.get(o.offer).state, "done", "the computer's row says done");
+      // Not now: declined, nothing read.
+      o = await offer(report);
+      assert.deepEqual(await F.takeOffer({ provider: net, node: id, plugin, offer: o, save: false }), { state: "declined" });
+      assert.deepEqual(answers(), ["declined"]);
+      assert.equal(reads().length, 0, "a declined offer reads nothing");
+      assert.equal(served.offers.get(o.offer).state, "declined");
+      // No plugin (a browser, an older app): failed with needsApp, nothing read.
+      o = await offer(report);
+      await assert.rejects(F.takeOffer({ provider: net, node: id, plugin: null, offer: o, save: true }), code("needsApp"));
+      assert.deepEqual(answers(), ["failed:needsApp"]);
+      assert.equal(reads().length, 0, "without the plugin nothing is read");
+      assert.equal(served.offers.get(o.offer).error, "needsApp");
+      // The file changes while it comes: failed with changed, nothing left on the phone.
+      const changingOffer = at("changing-offer.bin");
+      await fsp.writeFile(changingOffer, crypto.randomBytes(2 * MB));
+      o = await offer(changingOffer);
+      let touched = false;
+      plugin.onWrite = f => {
+        if (touched || f.written < 2 * CHUNK) return;
+        touched = true;
+        fs.writeFileSync(changingOffer, crypto.randomBytes(2 * MB));
+        const later = new Date(Date.now() + 240000);
+        fs.utimesSync(changingOffer, later, later);
+      };
+      await assert.rejects(F.takeOffer({ provider: net, node: id, plugin, offer: o, save: true }), code("changed"));
+      plugin.onWrite = null;
+      assert.ok(touched);
+      assert.deepEqual(answers(), ["accepted", "failed:changed"]);
+      assert.equal(fs.existsSync(path.join(phoneDir, "Downloads", "changing-offer.bin")), false, "nothing of a changed file stays on the phone");
+      assert.equal(served.offers.get(o.offer).error, "changed");
+      // Changed after it was offered, before Save: the first piece is refused, the plugin never begins a file.
+      o = await offer(report);
+      await fsp.appendFile(report, "more");
+      const begun = plugin.files.size;
+      await assert.rejects(F.takeOffer({ provider: net, node: id, plugin, offer: o, save: true }), code("changed"));
+      assert.equal(plugin.files.size, begun, "a file that is not the one offered is not begun on the phone");
+      // Withdrawn (or expired) there: the answer is refused and nothing is read.
+      o = await offer(report);
+      served.offers.withdraw(o.offer);
+      await assert.rejects(F.takeOffer({ provider: net, node: id, plugin, offer: o, save: true }), code("jobMissing"));
+      assert.equal(reads().length, 0, "an offer the computer no longer has reads nothing");
+      offOffers();
+      // What the phone shows must be a plain name and a real size.
+      const good = { offer: crypto.randomUUID(), path: report, name: "a.txt", size: 1, mtime: 1 };
+      assert.ok(F.checkOffer(good));
+      for (const bad of [null, { ...good, offer: "x" }, { ...good, name: "../a.txt" }, { ...good, name: "a/b" }, { ...good, name: "a\u0007b" }, { ...good, name: " a.txt" },
+        { ...good, size: -1 }, { ...good, size: 1.5 }, { ...good, path: "" }, { ...good, mtime: "x" }]) assert.equal(F.checkOffer(bad), null, JSON.stringify(bad));
+      console.log("ok: a file the computer sends - saved byte for byte (accepted, then done), declined, no plugin, changed on the way or before Save, withdrawn; every answer told");
 
       // ---------- an older computer ----------
       const old = createRemoteFiles({ provider: { request: () => Promise.reject(Object.assign(new Error("unknown"), { code: "unknownMethod" })), on: () => () => {} }, node: id, plugin });

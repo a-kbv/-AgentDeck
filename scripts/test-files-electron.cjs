@@ -25,7 +25,14 @@
 // on H, and a rename onto a taken name offering "name (2)"; copy on H (a file and a folder in place); delete on H (the
 // confirmation names H and says "for good") and here (names this computer and says "Recycle Bin"; the bin is the
 // hook's); a .md preview and a PDF opened from a temporary copy; OLD says it needs an update; H going away fails its
-// transfer under way cleanly and its dialog says it is not connected; nothing is left behind.
+// transfer under way cleanly and its dialog says it is not connected; nothing is left behind. "Send to phone" (docs/FILES.md
+// 3.6): on a file of this computer's pane only, disabled with its reason while no phone is linked; then a real phone
+// provider (mobile/src/provider-relay.js over `ws`, paired directly with the app's node before it starts) comes
+// online: the item names it, an offer reaches it, the queue row says "this computer → the phone" and follows its
+// answers - declined, and accepted and pulled through the app (mobile/src/files.js takeOffer into a fake plugin over a
+// temporary folder), byte for byte, to done. The order and the search of a pane: the Size column's head clicked twice
+// sorts H's folder largest first and then smallest first (folders first both ways), the order is remembered, and a name
+// typed into H's pane's search lists only the matches, with their count, until Escape clears it.
 //
 // Screenshots go to FILES_E2E_SHOTS (default: <repo>/.tmp/files-e2e). FILES_E2E_VERBOSE=1 prints the app's output.
 // Windows is where this was run. The app's window comes up and takes the focus for about a minute.
@@ -159,9 +166,9 @@ const kill = pid => new Promise(resolve => {
 
 // ---------- the mesh around the app ----------
 const VERSION = require("../package.json").version;
-function node(name, { api = async () => null, dir = path.join(root, "nodes", name) } = {}) {
+function node(name, { api = async () => null, dir = path.join(root, "nodes", name), port = 0 } = {}) {
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "node.json"), JSON.stringify({ port: 0, name, discoverable: false }));
+  fs.writeFileSync(path.join(dir, "node.json"), JSON.stringify({ port, name, discoverable: false }));
   return createLinks({ dir, defaultName: name, kind: "desktop", version: VERSION, api, discover: false, listen: "127.0.0.1", log: () => {} });
 }
 // What a desktop serves (as test-ports-electron.cjs): real terminals and one project; its home is the test's work folder.
@@ -205,7 +212,7 @@ const LIB = `(() => { if (window.__ft) return;
     crumbs: side => [...(ft.pane(side)?.querySelectorAll(".fcrumb") || [])].map(c => c.textContent),
     path: side => filesPanes.find(p => p.side === side)?.path ?? null,
     loading: side => Boolean(filesPanes.find(p => p.side === side)?.loading),
-    queue: () => [...document.querySelectorAll("#filesView .fq-row")].map(r => ({ name: r.querySelector(".fq-name").textContent, route: r.querySelector(".fq-route").textContent.replace(/\\s+/g, " ").trim(), state: ["queued", "running", "done", "failed", "stopped"].find(s => r.classList.contains(s)), shown: r.querySelector(".fq-state").textContent, detail: r.querySelector(".fq-detail").textContent })),
+    queue: () => [...document.querySelectorAll("#filesView .fq-row")].map(r => ({ name: r.querySelector(".fq-name").textContent, route: r.querySelector(".fq-route").textContent.replace(/\\s+/g, " ").trim(), state: ["queued", "running", "done", "failed", "stopped", "waiting", "noAnswer", "declined", "expired"].find(s => r.classList.contains(s)), shown: r.querySelector(".fq-state").textContent, detail: r.querySelector(".fq-detail").textContent })),
     menu: () => document.querySelector(".menu.files-menu"),
     menuRows: () => [...(ft.menu()?.querySelectorAll(":scope > button[data-i]") || [])].map(b => ({ i: Number(b.dataset.i), label: b.querySelector("span").textContent, disabled: b.disabled, danger: b.classList.contains("danger") })),
     menuRow: label => [...(ft.menu()?.querySelectorAll(":scope > button[data-i]") || [])].find(b => b.querySelector("span").textContent === label) || null,
@@ -245,7 +252,7 @@ const electronEnv = () => {
   return env;
 };
 const started = [], stops = [];
-let app = null;
+let app = null, phone = null, appId = "";
 async function startApp() {
   const flags = ["--disable-features=CalculateNativeWinOcclusion", "--disable-renderer-backgrounding", "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows"];
   const child = spawn(require("electron"), [...flags, "-r", __filename, ROOT, `--files-e2e=${NEEDLE}`], { cwd: ROOT, env: electronEnv(), stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: false });
@@ -352,7 +359,9 @@ async function main() {
     return served.api(m, p, peer);
   } });
   const old = node("OLD-BOX", { api: oldApi });
-  const seed = node("FILES-APP", { dir: path.join(profile, "node") });
+  // The app's node listens on a port of its own, the same before and after it starts: the phone dials it there.
+  const appPort = await new Promise(resolve => { const srv = require("node:net").createServer().listen(0, "127.0.0.1", () => { const { port } = srv.address(); srv.close(() => resolve(port)); }); });
+  const seed = node("FILES-APP", { dir: path.join(profile, "node"), port: appPort });
   stops.push(() => [h, old].forEach(l => l.stop()));
   const H = (await h.start()).id, OLD = (await old.start()).id;
   served.attach(h);
@@ -362,6 +371,19 @@ async function main() {
     await until(() => seed.online(id), "the nodes link", 15000);
     await sleep(1100); // one pairing a second from one address (pair-guard.js)
   }
+  // A phone, paired with the app's node directly (no relay: the address is in the pairing text), then put away until
+  // step 6b. Its WebSocket and the Noise inside it are the real phone app's.
+  const { createRelayProvider } = await import(require("node:url").pathToFileURL(path.join(ROOT, "mobile", "src", "provider-relay.js")).href);
+  const pairCode = require("../src/mesh/pair-code");
+  const inv = seed.invite();
+  appId = seed.self().id;
+  phone = createRelayProvider({ WebSocket: require("ws").WebSocket, keypair: require("../src/mesh/noise").generateKeypair(), name: "Test phone", version: "test" });
+  stops.push(() => phone.stop());
+  await phone.start();
+  const paired = await phone.pairAll(pairCode.encode({ r: null, n: [{ id: inv.id, k: pairCode.hexToKey(inv.key), c: inv.code, n: inv.name, t: inv.kind, a: "127.0.0.1", p: appPort }] }));
+  assert.ok(paired.every(x => x.state === "paired"), `the phone pairs with the app's node: ${J(paired)}`);
+  await until(() => phone.online(appId), "the phone links with the app's node", 15000);
+  phone.stop();
   seed.stop();
   await sleep(300);
   fs.writeFileSync(path.join(profile, "settings.json"), JSON.stringify({ ui: { language: LANG, autoUpdate: false }, edgeHandle: { show: false }, notify: { on: false } }));
@@ -440,6 +462,36 @@ async function main() {
   await listed("right");
   say("moving about: a double click opens a folder, 500 then 620 entries with Show more, the breadcrumb and Up lead back");
 
+  // ---------- 2c. the order and the search of a pane ----------
+  const names = async side => (await listed(side)).map(r => r.name);
+  const head = (side, key) => `__ft.pane(${J(side)}).querySelector('.fhead [data-sort="${key}"]')`;
+  const arrow = (side, key) => app.ev(`${head(side, key)}.querySelector('.fsort').textContent`);
+  assert.equal(await app.ev(`__ft.pane('right').querySelector('.fpane-find').hidden`), false, "H can sort and search: the search is there");
+  await u.click(head("right", "size"), "the Size column of H's pane");
+  await until(async () => (await arrow("right", "size")) === "▼", "the Size column says largest first");
+  assert.deepEqual(await names("right"), ["tree", "huge.bin", "build.bin", "notes.md", "spec.pdf", "taken.txt"], "largest first, the folder first");
+  await u.click(head("right", "size"), "the Size column again");
+  await until(async () => (await arrow("right", "size")) === "▲", "and then smallest first");
+  assert.deepEqual(await names("right"), ["tree", "taken.txt", "spec.pdf", "notes.md", "build.bin", "huge.bin"], "smallest first, the folder still first");
+  assert.equal(await arrow("right", "name"), "", "only the column in use has an arrow");
+  assert.deepEqual(await app.ev("JSON.parse(localStorage.getItem('agentdeck.files.sort')).right"), { sort: "size", desc: false }, "the order of H's side is remembered");
+  assert.equal(await arrow("left", "name"), "▲", "the other pane keeps its own order");
+  const shotSorted = await u.shot("02b-sorted-by-size");
+  await u.click(head("right", "name"), "the Name column");
+  await until(async () => (await arrow("right", "name")) === "▲", "back to name A-Z");
+  assert.deepEqual(await names("right"), ["tree", "build.bin", "huge.bin", "notes.md", "spec.pdf", "taken.txt"]);
+  // The search: a name typed, the matches only, after a pause; Escape clears it.
+  await u.click(`__ft.pane('right').querySelector('.fpane-filter')`, "H's search field");
+  await u.keys("TA");
+  await until(async () => J(await names("right")) === J(["taken.txt"]), "only the names that hold the text, whatever the case", 8000, 100);
+  assert.equal(await app.ev(`__ft.pane('right').querySelector('.fpane-count').textContent`), await u.t("files.count.matching", { n: 1 }));
+  const shotFiltered = await u.shot("02c-filtered");
+  await u.keys("", "Escape");
+  await until(async () => (await names("right")).length === 6, "Escape clears the search and lists all again", 8000, 100);
+  assert.equal(await app.ev("__ft.shown()"), true, "Escape in the search does not close the dialog");
+  assert.equal(await app.ev(`__ft.pane('right').querySelector('.fpane-filter').value`), "");
+  say(`order and search: Size twice - largest then smallest first, folders first (${shotSorted}); "TA" lists taken.txt only (${shotFiltered}); Escape clears it`);
+
   // ---------- 3. a multi-megabyte file, downloaded with a double click onto a name that is taken ----------
   await u.click("__ft.row('right', 'build.bin')", "build.bin on H", { count: 2 });
   const down = await u.queueRow("build.bin", r => r.state === "done", "the download ends");
@@ -485,6 +537,69 @@ async function main() {
   assert.ok(fs.readFileSync(path.join(hProject, "upload-me.bin")).equals(upload), "the dragged file arrived on H, equal");
   assert.deepEqual(parts(hProject), []);
   say(`upload: taken.txt arrived on H as "taken (2).txt" ("${up.route}"); upload-me.bin dragged across, equal`);
+
+  // ---------- 6b. send to phone ----------
+  const toPhone = await u.t("files.menu.toPhone");
+  const rightClick = async (side, name) => {
+    await u.click(`__ft.row(${J(side)}, ${J(name)})`, `the row ${name}`, { button: "right" });
+    await until(() => app.ev("Boolean(__ft.menu())"), `the menu of ${name} opens`, 5000);
+    return app.ev("__ft.menuRows()");
+  };
+  const closeMenu = async () => { await u.keys("", "Escape"); await until(async () => !(await app.ev("Boolean(__ft.menu())")), "the menu closes", 5000); };
+  let rows = await rightClick("left", "upload-me.bin");
+  const off = rows.find(r => r.label.startsWith(toPhone));
+  assert.ok(off, `a file of this computer has "${toPhone}" (the menu has: ${rows.map(r => r.label).join(" | ")})`);
+  assert.equal(off.disabled, true, "disabled while no phone is linked");
+  assert.equal(off.label, toPhone + (await u.t("files.toPhone.offline")), "and it says why: the phone is paired, not connected");
+  const shotNoPhone = await u.shot("08-send-to-phone-none");
+  await closeMenu();
+  rows = await rightClick("right", "notes.md");
+  assert.ok(!rows.some(r => r.label.startsWith(toPhone)), "a file of H is not sent to the phone from here (the phone pulls from the computer it is linked to)");
+  await closeMenu();
+  rows = await rightClick("left", "tree");
+  assert.ok(!rows.some(r => r.label.startsWith(toPhone)), "a folder is not sent to a phone");
+  await closeMenu();
+  // The phone comes online.
+  const offers = [];
+  phone.on("notify", n => { if (n.event === "files.offer") offers.push(n); });
+  await phone.start();
+  phone.wake();
+  await until(() => phone.online(appId), "the phone links with the app", 40000, 200);
+  const named = await u.t("files.menu.toPhoneNamed", { name: "Test phone" });
+  await until(async () => { const r = await rightClick("left", "upload-me.bin"); const ok = r.some(x => x.label === named && !x.disabled); if (!ok) await closeMenu(); return ok; }, "the menu names the phone once it is linked", 15000, 300);
+  const shotMenu = await u.shot("09-send-to-phone-menu");
+  await u.click(`__ft.menuRow(${J(named)})`, `"${named}"`);
+  await until(() => offers.length === 1, "the offer reaches the phone", 15000);
+  assert.equal(offers[0].node, appId, "from the app's node");
+  assert.equal(offers[0].payload.name, "upload-me.bin");
+  assert.equal(offers[0].payload.size, upload.length);
+  let sentRow = await u.queueRow("upload-me.bin", r => r.state === "waiting", "the queue has the offer, waiting for the phone");
+  assert.equal(sentRow.route, `FILES-APP (${await u.t("term.thisComputer")}) → Test phone`, "the row says from this computer to the phone");
+  await phone.request(appId, "files.answer", { offer: offers[0].payload.offer, state: "declined" });
+  sentRow = await u.queueRow("upload-me.bin", r => r.state === "declined", "the row says the phone declined");
+  assert.equal(sentRow.shown, await u.t("files.state.declined"));
+  // Again, accepted this time: the phone pulls it through the app with the phone app's own logic, into a fake plugin.
+  await rightClick("left", "upload-me.bin");
+  await u.click(`__ft.menuRow(${J(named)})`, `"${named}"`);
+  await until(() => offers.length === 2, "the second offer reaches the phone", 15000);
+  const phoneDir = path.join(root, "phone-downloads");
+  fs.mkdirSync(phoneDir, { recursive: true });
+  const plugin = {
+    begin: async ({ name }) => { const file = path.join(phoneDir, name); fs.writeFileSync(file, Buffer.alloc(0)); return { file }; },
+    write: async ({ file, data }) => { fs.appendFileSync(file, Buffer.from(data, "base64")); return {}; },
+    finish: async ({ file }) => ({ shown: path.basename(file) }),
+    cancel: async ({ file }) => { fs.rmSync(file, { force: true }); return {}; }
+  };
+  const M = await import(require("node:url").pathToFileURL(path.join(ROOT, "mobile", "src", "files.js")).href);
+  const offerSeen = M.checkOffer(offers[1].payload);
+  assert.ok(offerSeen, "the offer passes the phone's check");
+  const kept = await M.takeOffer({ provider: phone, node: appId, plugin, offer: offerSeen, save: true });
+  assert.ok(fs.readFileSync(path.join(phoneDir, kept.shown)).equals(upload), "the phone has the file, byte for byte");
+  sentRow = await u.queueRow("upload-me.bin", r => r.state === "done" && r.route.endsWith("Test phone"), "the row reaches done");
+  await app.ev("document.querySelector('#filesView .fq-list').scrollTop = 1e6");
+  const shotQueuePhone = await u.shot("10-send-to-phone-queue");
+  phone.stop();
+  say(`send to phone: disabled with its reason while the phone is away (${shotNoPhone}); named once linked (${shotMenu}); declined, then accepted and pulled byte for byte - the row "${sentRow.route}" ${sentRow.shown} (${shotQueuePhone})`);
 
   // ---------- 7. rename on H, and onto a name that is taken ----------
   await u.menu("right", "notes.md", await u.t("files.menu.rename"));
@@ -657,7 +772,7 @@ async function finish(error) {
   await cleanup();
   if (!error) {
     console.log(`\n  screenshots: ${shots}`);
-    console.log("files in the real app: the button on remote panes only, which pane is which computer, download (double click, taken name), Stop, a folder tree, upload (arrow, drag), rename (taken name offered as (2)), copy, delete (for good on H, the bin here, with confirmations), previews, a computer too old, H going away - passed");
+    console.log("files in the real app: the button on remote panes only, send to phone (none linked, then declined and done), which pane is which computer, download (double click, taken name), Stop, a folder tree, upload (arrow, drag), rename (taken name offered as (2)), copy, delete (for good on H, the bin here, with confirmations), previews, a computer too old, H going away - passed");
   }
   process.exit(error ? 1 : 0);
 }

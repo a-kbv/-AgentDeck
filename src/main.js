@@ -758,8 +758,56 @@ async function portAddress(id, port, https = false) {
 // host/files.js (served.files, which has the system's bin): no network. The window names a computer ("" this one) and
 // paths there, and gets { value } or { error, message }: the dialog acts on the codes ("exists" offers "name (2)",
 // "unknownMethod" asks for an update), so they are not turned into words only.
-const transfers = createFileTransfers({ links, local: served.files, nameOf: node => (node ? nodeName(node) : selfName()), onChange: list => sendToManager("files:transfers", list) });
+// A file of this computer sent to a phone is offered to it (served.offers) and is a row of the same queue; its
+// state also shows on the phone's row in Settings -> Computers (meshSettings, transferWatchers).
+const transferWatchers = new Set();
+const transfers = createFileTransfers({ links, local: served.files, offers: served.offers, nameOf: node => (node ? nodeName(node) : selfName()), onChange: list => {
+  sendToManager("files:transfers", list);
+  for (const fn of transferWatchers) try { fn(list); } catch {}
+} });
 links.on("link", ({ node, up }) => { if (!up) transfers.linkDown(node); });
+// The paired phones, for "Send to phone" in the dialog's menu (files-ui.js builds it at once, so the list is pushed to
+// the window as phones come and go): [{ id, name, online }].
+const phonesView = () => links.nodes().filter(n => n.kind === "mobile").map(n => ({ id: n.id, name: n.name || n.id.slice(0, 8), online: links.online(n.id) }));
+let phonesSent = "";
+function phonesChanged() {
+  const list = phonesView(), sig = JSON.stringify(list);
+  if (sig === phonesSent) return;
+  phonesSent = sig;
+  sendToManager("files:phones", list);
+}
+links.on("nodes", phonesChanged);
+links.on("link", phonesChanged);
+// A phone a file may be sent to: paired, and linked to this computer now.
+function phoneNode(node) {
+  if (typeof node !== "string" || !links.nodes().some(n => n.id === node && n.kind === "mobile")) throw new HostError("invalidData");
+  if (!links.online(node)) throw new HostError("offline");
+  return node;
+}
+// "Send file…" on a phone's row in Settings: a file of this computer chosen in the system's picker, offered to it.
+// -> { ok, name } | { ok: false, cancelled } | { ok: false, error } (in the user's language).
+async function sendFileToPhone(id) {
+  try {
+    const node = phoneNode(id);
+    const picked = await dialog.showOpenDialog({ title: t("settings.phones.sendTitle", { name: nodeName(node) }), properties: ["openFile"], defaultPath: downloadsDir() });
+    if (picked.canceled || !picked.filePaths?.[0]) return { ok: false, cancelled: true };
+    const row = await transfers.offer({ node: phoneNode(id), path: picked.filePaths[0] });
+    return { ok: true, name: row.name };
+  } catch (e) {
+    return { ok: false, error: translated(e).message };
+  }
+}
+// The last file sent to each phone and how it went, for its row in Settings: { [phone id]: { name, state, error } }.
+function phoneSends(list = transfers.list()) {
+  const out = {};
+  for (const r of list) if (r.kind === "offer") out[r.to.node] = { name: r.name, state: r.state, error: r.error ? errorWords(r.error) : "" };
+  return out;
+}
+// A code as words, or the code itself where there are none (a phone's codes may be newer than this app).
+function errorWords(code) {
+  const words = t(`errors.${code}`);
+  return words === `errors.${code}` ? code : words;
+}
 // Where the left pane starts. A profile whose Downloads cannot be found (an isolated test profile) starts in the home.
 function downloadsDir() {
   try { const dir = app.getPath("downloads"); if (isDir(dir)) return dir; } catch {}
@@ -1006,7 +1054,9 @@ async function forgetPhone(id) {
 }
 const meshSettings = {
   // error: why the mesh is off (self is null then).
-  state: () => ({ self: links.self(), error: meshError, nodes: computers(), phones: links.nodes().filter(n => n.kind === "mobile"), discovered: links.discovered(), lan: lanAddresses() }),
+  // sends: the last file sent to each phone (phoneSends).
+  state: () => ({ self: links.self(), error: meshError, nodes: computers(), phones: links.nodes().filter(n => n.kind === "mobile"), sends: phoneSends(), discovered: links.discovered(), lan: lanAddresses() }),
+  sendFile: id => sendFileToPhone(String(id ?? "")),
   invitePhone: async args => {
     try { return await invitePhone(isObj(args) ? args : {}); } catch (e) { return { ok: false, error: translated(e).message }; }
   },
@@ -1037,7 +1087,17 @@ const meshSettings = {
       return { ok: false, error: translated(e).message };
     }
   },
-  on: cb => { for (const ev of ["nodes", "self", "discovered"]) links.on(ev, () => cb(meshSettings.state())); }
+  on: cb => {
+    for (const ev of ["nodes", "self", "discovered"]) links.on(ev, () => cb(meshSettings.state()));
+    // Only when what a phone's row says changed: the page is drawn again whole, and a transfer's progress ticks often.
+    let sendsSent = "";
+    transferWatchers.add(list => {
+      const sig = JSON.stringify(phoneSends(list));
+      if (sig === sendsSent) return;
+      sendsSent = sig;
+      cb(meshSettings.state());
+    });
+  }
 };
 function spawnDetached(file, args, opts) {
   const child = spawn(file, args, { detached: true, stdio: "ignore", ...opts });
@@ -1674,6 +1734,10 @@ function registerIpc() {
   handle("files:transfers", () => transfers.list());
   handle("files:stop", id => transfers.stop(text(id, 64)));
   handle("files:clear", () => transfers.clear());
+  // A file of this computer offered to a phone linked now (docs/FILES.md 3.6): a row of the queue that follows the
+  // phone's answers. The phones that could take one: [{ id, name, online }], and again as they come and go.
+  handle("files:offer", (node, file) => filesAnswer(() => transfers.offer({ node: phoneNode(node), path: text(file) })));
+  handle("files:phones", () => phonesView());
   // Tokens and API-equivalent cost (usage.js): the last result at once, or a fresh pass over the transcripts.
   handle("usage:get", () => usage.get());
   // The shortcuts as set now: the menu's hotkey and the voice ones (labels such as "Ctrl + Shift + Space").

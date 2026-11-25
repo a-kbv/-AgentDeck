@@ -149,7 +149,13 @@ contextBridge.exposeInMainWorld("files", {
   transfers: () => ipcRenderer.invoke("files:transfers"),
   stop: id => ipcRenderer.invoke("files:stop", id),
   clear: () => ipcRenderer.invoke("files:clear"),
-  onTransfers: cb => ipcRenderer.on("files:transfers", (_e, list) => cb(list))
+  onTransfers: cb => ipcRenderer.on("files:transfers", (_e, list) => cb(list)),
+  // A file of this computer sent to a phone linked now (it is offered; the phone asks and pulls it): a row of the
+  // queue (kind "offer", states "waiting" | "noAnswer" | "running" | "done" | "declined" | "failed" | "expired" |
+  // "stopped"). phones() -> [{ id, name, online }], and again as they come and go.
+  offer: (node, file) => ipcRenderer.invoke("files:offer", node, file),
+  phones: () => ipcRenderer.invoke("files:phones"),
+  onPhones: cb => ipcRenderer.on("files:phones", (_e, list) => cb(list))
 });
 // Meetings (meetings/ipc.js): the manager window's, refused to every other. A project by its folder, a meeting by its
 // id. Each answers { ok: true, value } or { ok: false, code, message }.

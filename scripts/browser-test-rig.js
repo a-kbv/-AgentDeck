@@ -83,16 +83,21 @@ async function withPhone(browser, run, servedOpts = {}) {
     await waitFor(() => host.online(relay.self().id), "desktop -> relay");
     const { createRelayProvider } = await import(pathToFileURL(path.join(__dirname, "../mobile/src/provider-relay.js")).href);
     const entry = inv => ({ id: inv.id, k: pairCode.hexToKey(inv.key), c: inv.code, n: inv.name, t: inv.kind });
-    const { t: _kind, ...r } = entry(await host.call(relay.self().id, "pair.invite"));
-    const payload = pairCode.encode({ r: { ...r, a: "127.0.0.1", p: relay.self().port }, n: [entry(host.invite())] });
-    const phone = createRelayProvider({ WebSocket, keypair: noise.generateKeypair(), name: "Browser test phone", version: "test" });
-    phones.push(phone);
-    await phone.start();
-    const paired = await phone.pairAll(payload);
-    if (!paired.every(x => x.state === "paired")) throw new Error(`Pairing failed: ${JSON.stringify(paired)}`);
-    await waitFor(() => phone.online(host.self().id), "phone -> relay -> desktop");
+    // A phone paired with the relay and the desktop, linked through the relay (more than one may be).
+    const pairPhone = async (name = "Browser test phone") => {
+      const { t: _kind, ...r } = entry(await host.call(relay.self().id, "pair.invite"));
+      const payload = pairCode.encode({ r: { ...r, a: "127.0.0.1", p: relay.self().port }, n: [entry(host.invite())] });
+      const p = createRelayProvider({ WebSocket, keypair: noise.generateKeypair(), name, version: "test" });
+      phones.push(p);
+      await p.start();
+      const paired = await p.pairAll(payload);
+      if (!paired.every(x => x.state === "paired")) throw new Error(`Pairing failed: ${JSON.stringify(paired)}`);
+      await waitFor(() => p.online(host.self().id), "phone -> relay -> desktop");
+      return p;
+    };
+    const phone = await pairPhone();
     const call = (method, params = {}) => phone.request(host.self().id, method.includes(".") ? method : `browser.${method}`, params, { timeout: 20000 });
-    await run({ call, phone, host, relay, served, node });
+    await run({ call, phone, host, relay, served, node, pairPhone });
   } finally {
     for (const phone of phones) phone.stop();
     for (const n of nodes.reverse()) n.stop();

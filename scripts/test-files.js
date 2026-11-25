@@ -1,7 +1,8 @@
 // The files of a computer for a paired one (src/host/files.js, docs/FILES.md): what must never happen is a file
 // written over, a file put together from two versions, an unfinished file under its real name, a copy that never
 // ends, and a drive or the home deleted. First the module by itself in a temporary folder (with a home that is a
-// temporary folder too - nothing here can reach the real one), then the same through a real phone, relay and host.
+// temporary folder too - nothing here can reach the real one), then the same through a real phone, relay and host,
+// and a file of the host offered to a phone (src/host/file-offers.js) and answered by it.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const fsp = fs.promises;
@@ -70,6 +71,32 @@ async function alone(root) {
   assert.ok(seen.slice(0, firstFile).every(e => e.dir) && seen.slice(firstFile).every(e => !e.dir), "folders first");
   assert.equal(seen.find(e => e.name === "file-1.txt").size, 10);
   await assert.rejects(files.list({ path: at("many", "file-1.txt") }), code("notFolder"));
+  // Other orders and a search by name: folders stay first, pages still hold every entry once.
+  const sorted = at("sorted");
+  await fsp.mkdir(sorted); await fsp.mkdir(path.join(sorted, "zeta")); await fsp.mkdir(path.join(sorted, "Alpha"));
+  for (const [name, bytes, day] of [["small-old.txt", 1, 1], ["Big-new.APK", 900, 3], ["middle.md", 50, 2]]) {
+    await fsp.writeFile(path.join(sorted, name), Buffer.alloc(bytes));
+    await fsp.utimes(path.join(sorted, name), new Date(2026, 0, day), new Date(2026, 0, day));
+  }
+  const namesOf = async q => (await files.list({ path: sorted, ...q })).entries.map(e => e.name);
+  assert.deepEqual(await namesOf({}), ["Alpha", "zeta", "Big-new.APK", "middle.md", "small-old.txt"]);
+  assert.deepEqual(await namesOf({ desc: true }), ["zeta", "Alpha", "small-old.txt", "middle.md", "Big-new.APK"]);
+  assert.deepEqual((await namesOf({ sort: "mtime", desc: true })).slice(2), ["Big-new.APK", "middle.md", "small-old.txt"], "the newest first");
+  assert.deepEqual((await namesOf({ sort: "size" })).slice(2), ["small-old.txt", "middle.md", "Big-new.APK"]);
+  assert.deepEqual((await namesOf({ sort: "size", desc: true })).slice(0, 2).sort(), ["Alpha", "zeta"], "folders first in every order");
+  assert.deepEqual(await namesOf({ filter: "APK" }), ["Big-new.APK"]);
+  assert.deepEqual(await namesOf({ filter: "a", sort: "size", desc: true }), ["zeta", "Alpha", "Big-new.APK", "small-old.txt"]);
+  assert.equal((await files.list({ path: sorted, filter: "md" })).total, 1);
+  await assert.rejects(files.list({ path: sorted, sort: "colour" }), code("invalidData"));
+  const bySize = [];
+  for (let after; ;) {
+    const page = await files.list({ path: many, sort: "size", desc: true, after, limit: 400 });
+    bySize.push(...page.entries.map(e => e.name));
+    if (!page.next) break;
+    after = page.next;
+  }
+  assert.deepEqual([...bySize].sort(), [...names].sort(), "another order in pages: every entry once");
+  assert.equal((await files.list({ path: many, filter: "file-11" })).entries.length, names.filter(n => n.includes("file-11")).length);
   await assert.rejects(files.list({ path: many, limit: PAGE + 1 }), code("invalidData"));
   console.log("ok: 1200 entries in three pages, none twice, none left out");
 
@@ -263,11 +290,98 @@ async function served(root) {
   console.log("ok: real phone -> relay -> host: listed, read whole, uploaded, changed; cleaned up with the link; refused to a resource host");
 }
 
+// A file of the host offered to a phone (src/host/file-offers.js, docs/FILES.md 3.6), through the same real phone ->
+// relay -> host: the offer reaches the phone it was made to as a "files.offer" event; its answers are taken, in order
+// only; another phone's, and one for an offer that is unknown, withdrawn or expired, are refused (jobMissing); an
+// offer nobody answers says "noAnswer" yet stays answerable until it expires; an accepted one fails with the link.
+async function offered(root) {
+  const work = path.join(root, "offered");
+  await fsp.mkdir(work);
+  const body = crypto.randomBytes(300 * 1024 + 9);
+  const file = path.join(work, "report.pdf");
+  await fsp.writeFile(file, body);
+  const ANSWER_MS = 300, EXPIRE_MS = 1200;
+  await withPhone({ dispose() {}, drop() {} }, async ({ phone, host, served, pairPhone, relay }) => {
+    const hostId = host.self().id;
+    const heard = [], seen = [];
+    phone.on("notify", n => { if (n.event === "files.offer") heard.push(n); });
+    served.offers.on("change", v => seen.push(`${v.name}:${v.state}${v.noAnswer ? "/noAnswer" : ""}${v.error ? `/${v.error}` : ""}`));
+    const other = await pairPhone("Another phone");
+    const otherHeard = [];
+    other.on("notify", n => { if (n.event === "files.offer") otherHeard.push(n); });
+    const answer = (p, offer, state, extra = {}) => p.request(hostId, "files.answer", { offer, state, ...extra }, { timeout: 10000 });
+    const phoneId = phone.id;
+
+    // ---------- the offer reaches the phone it was made to ----------
+    const o = await served.offers.make(phoneId, { path: file });
+    assert.equal(o.state, "waiting");
+    await waitFor(() => heard.length === 1, "the offer reaches the phone");
+    assert.equal(heard[0].node, hostId, "from the host");
+    assert.deepEqual({ ...heard[0].payload, mtime: 0 }, { offer: o.offer, path: file, name: "report.pdf", size: body.length, mtime: 0 });
+    assert.ok(heard[0].payload.mtime > 0, "with the file's time, for the download's first piece");
+    assert.equal(otherHeard.length, 0, "the other phone hears nothing of it");
+
+    // ---------- answers: only the phone's, only in order ----------
+    await assert.rejects(answer(other, o.offer, "accepted"), code("jobMissing"), "another phone's answer is refused");
+    await assert.rejects(answer(phone, "no-such-offer", "accepted"), code("jobMissing"), "an unknown offer is refused");
+    await assert.rejects(answer(phone, o.offer, "done"), code("invalidData"), "done before accepted is refused");
+    await assert.rejects(answer(phone, o.offer, "maybe"), code("invalidData"));
+    assert.equal(await answer(phone, o.offer, "accepted"), true);
+    await assert.rejects(answer(phone, o.offer, "declined"), code("invalidData"), "an accepted offer is not declined");
+    // The phone pulls it with the existing download (here: by hand), then says so.
+    const first = await phone.request(hostId, "files.read", { path: file, pos: 0, len: CHUNK, size: heard[0].payload.size, mtime: heard[0].payload.mtime });
+    assert.equal(first.size, body.length);
+    assert.equal(await answer(phone, o.offer, "done"), true);
+    await assert.rejects(answer(phone, o.offer, "done"), code("jobMissing"), "an offer that ended is not answered again");
+    assert.equal(served.offers.get(o.offer).state, "done");
+
+    // ---------- declined, failed with a code, a folder, a computer ----------
+    const d = await served.offers.make(phoneId, { path: file });
+    await answer(phone, d.offer, "declined");
+    const f = await served.offers.make(phoneId, { path: file });
+    await answer(phone, f.offer, "failed", { error: "needsApp" });
+    assert.equal(served.offers.get(f.offer).error, "needsApp");
+    const g = await served.offers.make(phoneId, { path: file });
+    await answer(phone, g.offer, "failed", { error: "<script>" });
+    assert.equal(served.offers.get(g.offer).error, "fileFailed", "an error that is not a plain code is not passed on");
+    await assert.rejects(served.offers.make(phoneId, { path: work }), code("notFile"), "a folder is not offered");
+    await assert.rejects(served.offers.make(phoneId, { path: path.join(work, "gone.bin") }), code("fileMissing"));
+    await assert.rejects(served.offers.make(relay.self().id, { path: file }), code("offline"), "only a phone is offered files");
+    await assert.rejects(served.offers.make("someone-unknown", { path: file }), code("offline"));
+    const w = await served.offers.make(phoneId, { path: file });
+    assert.equal(served.offers.withdraw(w.offer), true);
+    await assert.rejects(answer(phone, w.offer, "accepted"), code("jobMissing"), "a withdrawn offer is not taken");
+    console.log("ok: an offer reaches the phone it was made to; its answers are taken in order; another phone's, an unknown and a withdrawn one are refused");
+
+    // ---------- nobody answers ----------
+    const quiet = await served.offers.make(phoneId, { path: file });
+    await waitFor(() => served.offers.get(quiet.offer)?.noAnswer, "no answer within answerMs", 3000);
+    assert.equal(served.offers.get(quiet.offer).state, "waiting", "no answer yet is not an end");
+    const late = await served.offers.make(phoneId, { path: file });
+    await waitFor(() => served.offers.get(late.offer)?.noAnswer, "the late one says no answer too", 3000);
+    assert.equal(await answer(phone, late.offer, "accepted"), true, "a late answer before the offer expires is taken");
+    assert.equal(served.offers.get(late.offer).noAnswer, false);
+    await waitFor(() => served.offers.get(quiet.offer)?.state === "expired", "the unanswered offer expires", 5000);
+    await assert.rejects(answer(phone, quiet.offer, "accepted"), code("jobMissing"), "an expired offer is not taken");
+    await new Promise(r => setTimeout(r, EXPIRE_MS + 200));
+    assert.equal(served.offers.get(late.offer).state, "accepted", "an accepted offer does not expire while it downloads");
+
+    // ---------- the phone's link drops ----------
+    phone.stop();
+    await waitFor(() => served.offers.get(late.offer)?.state === "failed", "an accepted offer fails with the link");
+    assert.equal(served.offers.get(late.offer).error, "offline");
+    await assert.rejects(served.offers.make(phoneId, { path: file }), code("offline"), "a phone that is not linked is not offered anything");
+    assert.deepEqual(seen.filter(x => !x.startsWith("report.pdf:waiting")).slice(0, 6), ["report.pdf:accepted", "report.pdf:done", "report.pdf:declined", "report.pdf:failed/needsApp", "report.pdf:failed/fileFailed", "report.pdf:withdrawn"], "every step is told to the computer");
+    console.log("ok: no answer is said after a while yet stays answerable; an unanswered offer expires; an accepted one fails with the link");
+  }, { host: { home: path.join(root, "home") }, served: { offerTimes: { answerMs: ANSWER_MS, expireMs: EXPIRE_MS } } });
+}
+
 (async () => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agentdeck-files-"));
   try {
     await alone(root);
     await served(root);
+    await offered(root);
     console.log("files: all checks passed");
   } finally {
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {});

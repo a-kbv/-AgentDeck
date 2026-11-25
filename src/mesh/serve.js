@@ -24,7 +24,8 @@
 // to the peer as "port.closed" { stream }; a link that drops takes the peer's streams with it.
 //
 // createServed({ host, env }) -> { api, attach(links) }: api(method, params, peer) answers a peer's request;
-// attach(links) hooks the host's events to the links once they exist.
+// attach(links) hooks the host's events to the links once they exist. A file here is offered to a phone with
+// offers.make(phone, { path }) (host/file-offers.js); the phone answers with "files.answer".
 const { HostError } = require("../host/errors");
 const { isReport } = require("../host/viewers");
 const { terminalEnv } = require("../host/terminal-env");
@@ -38,6 +39,7 @@ const { resolveFolder } = require("../host/project-folder");
 const { getProject, addProject } = require("../host/registry");
 const { createBrowser } = require("../host/browser");
 const { createFiles } = require("../host/files");
+const { createFileOffers } = require("../host/file-offers");
 // The most of one message a peer may ask sessions.preview for. A preview is six messages: at this bound it is at
 // most about 100 000 characters (a few hundred kilobytes for text that is not Latin) - still quick over a mobile
 // link, which carries it through the relay in 32 KB pieces - and all but the longest answers fit whole.
@@ -60,13 +62,20 @@ const dim = v => {
 // host: host/index.js (equipTerminals: terminals, launch, viewers, tabs(), liveSessions()); env(): the environment
 // for a terminal opened for a peer (a promise; with the proxy, on a desktop); info(): what host.info adds (the node's
 // own description comes from the links); liveMs: how often the live status is looked at for the peers.
-function createServed({ host, env = async () => terminalEnv(process.env), info = () => ({}), liveMs = LIVE_MS, browser = createBrowser(), trash = null }) {
+function createServed({ host, env = async () => terminalEnv(process.env), info = () => ({}), liveMs = LIVE_MS, browser = createBrowser(), trash = null, offerTimes = {} }) {
   const { terminals, launch, sendText, sessions, git, setup, viewers } = host;
   const path = require("node:path");
   const fs = require("node:fs");
   let links = null, layout = null, lagTimer = null;
   // The files of this computer for the peers (docs/FILES.md); trash: the system's bin, where there is one.
   const files = createFiles({ home: host.home, trash, notify: (peer, name, data) => links?.notify(peer, name, data) });
+  // A file of this computer offered to a paired phone, which pulls it itself (host/file-offers.js); offerTimes: its
+  // answerMs / expireMs (a test's are short).
+  const offers = createFileOffers({
+    files, ...offerTimes,
+    notify: (peer, name, data) => links?.notify(peer, name, data),
+    isPhone: peer => Boolean(links?.online(peer) && links.sees(peer) && links.nodes().some(n => n.id === peer && n.kind === "mobile"))
+  });
   const ctl = new Set();      // peers that made a terminals or ports request on their current link: their frames are taken
   const behind = new Map();   // peer id -> Set of terminal ids whose output it is behind on
   const ports = createPortStreams({
@@ -282,6 +291,8 @@ function createServed({ host, env = async () => terminalEnv(process.env), info =
     "files.write": (p, peer) => files.write(peer.id, p),
     "files.commit": (p, peer) => files.commit(peer.id, p),
     "files.abort": (p, peer) => files.abort(peer.id, p),
+    // {offer, state: "accepted" | "declined" | "done" | "failed", error?}: a phone's word on a file offered to it.
+    "files.answer": (p, peer) => offers.answer(peer.id, p),
     "browser.list": (p, peer) => browser.list(peer.id),
     "browser.attach": (p, peer) => browser.attach(peer.id, p),
     "browser.frame": (p, peer) => browser.frame(peer.id, p),
@@ -405,11 +416,12 @@ function createServed({ host, env = async () => terminalEnv(process.env), info =
       ports.drop(node);
       browser.drop(node);
       files.drop(node);
+      offers.drop(node);
       viewers.leave(node);
     });
   }
 
-  return { api, attach, ports, browser, files, get layout() { return layout; } };
+  return { api, attach, ports, browser, files, offers, get layout() { return layout; } };
 }
 
 module.exports = { createServed };

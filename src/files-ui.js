@@ -2,7 +2,16 @@
 // terminal's computer's on the right, as in FileZilla, and the queue of what goes between them under both. Which pane
 // is which computer is said in each pane's head (the name, and "This computer" or "Remote"), and every row of the queue
 // says "from → to" by name. A transfer goes into the folder the other pane shows: a drag from one pane onto the other,
-// a double click on a file, or the arrows between the panes; a folder goes with everything in it.
+// a double click on a file, or the arrows between the panes; a folder goes with everything in it. A file of this
+// computer can also be sent to a paired phone that is linked now ("Send to phone" in its menu): the phone is offered it,
+// asks its user and pulls it itself (docs/FILES.md 3.6); its row follows the phone's answers.
+//
+// Each pane has its own order - a click on a column's head sorts by it, a second click the other way round, an arrow
+// shows which - and a search by name, asked of that computer a moment after the typing stops (its x and Escape clear
+// it; it goes when another folder is opened). The order of each side is remembered (localStorage). Folders stay
+// first. Any order but the name's makes the computer look at every entry before the first page, so a list is asked
+// for only when the user changes something. A computer whose answer has no `total` cannot sort yet: its pane shows
+// neither. Transfers walk folders in the default order (file-transfers.js), whatever a pane shows.
 //
 // main.js does the work (preload.js window.files; file-transfers.js): a side is a computer, "" for this one, and its
 // paths are its own - the other computer may be Linux, so a path there is joined with the separator it answered, never
@@ -13,6 +22,30 @@ let filesView = null;     // the overlay, once built
 let filesPanes = [];      // [left, right]: { side, node, name, trash, error, path, sep, parent, entries, next, sel, anchor, loading, note }
 let filesQueue = [];      // main's list (preload.js files.transfers)
 let filesDrag = null;     // the pane a drag started in
+let filesPhones = [];     // the paired phones, [{ id, name, online }] (preload.js files.phones)
+const FILES_SORT_KEY = "agentdeck.files.sort"; // { left: { sort, desc }, right: { sort, desc } }
+const FILTER_MS = 350;    // the pause in typing after which the computer is asked
+const SORTS = ["name", "size", "mtime"];
+function savedSort(side) {
+  try {
+    const x = JSON.parse(localStorage.getItem(FILES_SORT_KEY))?.[side];
+    if (SORTS.includes(x?.sort)) return { sort: x.sort, desc: x.desc === true };
+  } catch {}
+  return { sort: "name", desc: false };
+}
+function saveSort(pane) {
+  try {
+    const all = JSON.parse(localStorage.getItem(FILES_SORT_KEY)) || {};
+    all[pane.side] = { sort: pane.sort, desc: pane.desc };
+    localStorage.setItem(FILES_SORT_KEY, JSON.stringify(all));
+  } catch {}
+}
+// What files.list is asked for besides the path: only what differs from the default (an older computer sees nothing
+// it does not know); the list of the drives takes none.
+function listParams(pane, path) {
+  if (!path) return {};
+  return { ...(pane.sort !== "name" ? { sort: pane.sort } : {}), ...(pane.desc ? { desc: true } : {}), ...(pane.filter ? { filter: pane.filter } : {}) };
+}
 const FILE_DRAG_TYPE = "text/x-agentdeck-files";
 
 // ---------- small helpers ----------
@@ -57,7 +90,10 @@ function buildFilesView() {
         </span>
       </header>
       <nav class="fpane-crumbs"></nav>
-      <div class="frow fhead" aria-hidden="true"><span class="fname">${esc(t("files.col.name"))}</span><span class="fsize">${esc(t("files.col.size"))}</span><span class="ftime">${esc(t("files.col.time"))}</span></div>
+      <div class="fpane-find"><span class="fpane-search">${icon("search")}<input class="input fpane-filter" type="text" autocomplete="off" spellcheck="false" placeholder="${esc(t("files.filterPh"))}" aria-label="${esc(t("files.filterPh"))}">
+        <button class="icon-btn" data-fa="unfilter" title="${esc(t("files.filterClear"))}" aria-label="${esc(t("files.filterClear"))}" hidden>${icon("x")}</button></span><small class="fpane-count" role="status"></small></div>
+      <div class="frow fhead">${[["name", "fname", "files.col.name"], ["size", "fsize", "files.col.size"], ["mtime", "ftime", "files.col.time"]].map(([key, cls, label]) =>
+        `<button class="fcol ${cls}" data-sort="${key}" title="${esc(t("files.sortBy", { column: t(label) }))}"><span>${esc(t(label))}</span><i class="fsort" aria-hidden="true"></i></button>`).join("")}</div>
       <div class="fpane-list" tabindex="0" role="listbox" aria-multiselectable="true"></div>
     </section>`;
   el.innerHTML = `<div class="files-dlg" role="dialog" aria-modal="true" aria-labelledby="filesTitle">
@@ -84,7 +120,9 @@ function buildFilesView() {
 async function openFilesDialog(term) {
   const sides = await window.files.open(term);
   filesView ||= buildFilesView();
-  filesPanes = [sides.left, sides.right].map((s, i) => ({ ...s, side: i ? "right" : "left", path: null, sep: "", parent: null, entries: [], next: "", sel: new Set(), anchor: -1, loading: false, note: "" }));
+  filesPanes = [sides.left, sides.right].map((s, i) => ({ ...s, side: i ? "right" : "left", path: null, sep: "", parent: null, entries: [], next: "", sel: new Set(), anchor: -1, loading: false, note: "",
+    ...savedSort(i ? "right" : "left"), filter: "", total: null, sortable: false, timer: 0 }));
+  for (const pane of filesPanes) paneEl(pane).querySelector(".fpane-filter").value = "";
   filesView.querySelector("#filesTitle span").textContent = t("files.title", { name: sides.right.name });
   for (const pane of filesPanes) {
     const el = paneEl(pane);
@@ -101,6 +139,7 @@ async function openFilesDialog(term) {
   // The window behind takes no focus and no keys meanwhile (a terminal there would type them).
   document.querySelector("main").inert = true;
   renderFilesQueue(await window.files.transfers());
+  filesPhones = await window.files.phones();
   for (const pane of filesPanes) {
     if (pane.error) { pane.note = t(pane.error === "offline" ? "files.offline" : "files.needsUpdate", { name: pane.name }); renderPane(pane); }
     else goTo(pane, pane.start, [pane.node ? "~" : "", ""]);
@@ -119,10 +158,12 @@ const paneOf = el => filesPanes.find(p => p.side === el?.closest?.(".fpane")?.da
 // ---------- a pane: listing, paging, drawing ----------
 // A folder opened: its first page. One that cannot be listed leaves the pane where it was - or, for the folder a pane
 // starts in, goes on to the next of `fallback` (the home, the drives).
-async function goTo(pane, path, fallback = []) {
+// keep: the same folder in another order or with another search (else a search typed for the last folder goes).
+async function goTo(pane, path, fallback = [], { keep = false } = {}) {
+  if (!keep && pane.filter) { pane.filter = ""; paneEl(pane).querySelector(".fpane-filter").value = ""; }
   pane.loading = true;
   renderPane(pane);
-  const r = await window.files.call(pane.node, "list", { path });
+  const r = await window.files.call(pane.node, "list", { path, ...listParams(pane, path) });
   pane.loading = false;
   if (r.error) {
     if (fallback.length && r.error !== "offline" && r.error !== "unknownMethod") return goTo(pane, fallback[0], fallback.slice(1));
@@ -133,15 +174,18 @@ async function goTo(pane, path, fallback = []) {
     return false;
   }
   Object.assign(pane, { path: r.value.path, sep: r.value.sep, parent: r.value.parent, entries: r.value.entries, next: r.value.next, sel: new Set(), anchor: -1, note: "" });
+  // A computer that answers no total cannot sort or search (an older AgentDeck); the drives are not sorted either.
+  pane.total = Number.isInteger(r.value.total) ? r.value.total : null;
+  if (pane.path) pane.sortable = pane.total !== null;
   renderPane(pane);
   paneEl(pane).querySelector(".fpane-list").scrollTop = 0;
   return true;
 }
-const refreshPane = pane => (pane.path === null ? Promise.resolve(false) : goTo(pane, pane.path));
+const refreshPane = pane => (pane.path === null ? Promise.resolve(false) : goTo(pane, pane.path, [], { keep: true }));
 async function loadMore(pane) {
   if (!pane.next || pane.loading) return;
   pane.loading = true;
-  const r = await window.files.call(pane.node, "list", { path: pane.path, after: pane.next });
+  const r = await window.files.call(pane.node, "list", { path: pane.path, after: pane.next, ...listParams(pane, pane.path) });
   pane.loading = false;
   if (r.error) return filesFailed(pane, r);
   if (r.value.path !== pane.path) return;
@@ -169,6 +213,21 @@ function renderPane(pane) {
   el.querySelector('[data-fa="up"]').disabled = off || pane.parent === null || pane.path === null;
   el.querySelector('[data-fa="mkdir"]').disabled = off || !pane.path;
   pane.crumbs = pane.path === null ? [] : crumbsOf(pane);
+  // The order and the search: only where that computer can do them, and not on the list of the drives.
+  const sorting = !off && pane.sortable && Boolean(pane.path);
+  el.querySelector(".fpane-find").hidden = !sorting;
+  el.classList.toggle("sortable", sorting);
+  for (const b of el.querySelectorAll(".fhead [data-sort]")) {
+    const on = sorting && b.dataset.sort === pane.sort;
+    b.disabled = !sorting;
+    b.classList.toggle("on", on);
+    b.querySelector(".fsort").textContent = on ? (pane.desc ? "▼" : "▲") : "";
+    b.setAttribute("aria-sort", on ? (pane.desc ? "descending" : "ascending") : "none");
+  }
+  el.querySelector('[data-fa="unfilter"]').hidden = !el.querySelector(".fpane-filter").value;
+  el.querySelector(".fpane-count").textContent = !sorting || pane.total === null ? ""
+    : pane.filter ? t("files.count.matching", { n: pane.total })
+    : pane.entries.length < pane.total ? t("files.count.some", { n: pane.entries.length, total: pane.total }) : tn("files.items", pane.total);
   el.querySelector(".fpane-crumbs").innerHTML = pane.crumbs.map((c, i) => `${i ? `<span class="fcrumb-sep">›</span>` : ""}<button class="fcrumb" data-crumb="${i}" title="${esc(c.path || c.label)}">${esc(c.label)}</button>`).join("");
   const list = el.querySelector(".fpane-list");
   if (pane.note) { list.innerHTML = `<div class="fpane-note">${icon("alert")}<span>${esc(pane.note)}</span></div>`; return; }
@@ -176,7 +235,7 @@ function renderPane(pane) {
   const rows = pane.entries.map((e, i) => `<div class="frow${e.dir ? " dir" : ""}${pane.sel.has(i) ? " sel" : ""}${e.name.startsWith(".") ? " hidden-file" : ""}" data-i="${i}" draggable="true" role="option" aria-selected="${pane.sel.has(i)}">
       <span class="fname">${icon(e.dir ? "folder" : "file")}<span title="${esc(e.name)}">${esc(e.name)}</span>${e.link ? `<small class="flink">↪</small>` : ""}</span>
       <span class="fsize">${e.dir ? "" : esc(sizeText(e.size))}</span><span class="ftime">${esc(timeText(e.mtime))}</span></div>`).join("");
-  list.innerHTML = (rows || `<div class="fpane-note">${esc(t("files.empty"))}</div>`) + (pane.next ? `<button class="btn sm fmore" data-fa="more">${esc(t("files.loadMore"))}</button>` : "");
+  list.innerHTML = (rows || `<div class="fpane-note">${esc(pane.filter ? t("files.noMatch", { filter: pane.filter }) : t("files.empty"))}</div>`) + (pane.next ? `<button class="btn sm fmore" data-fa="more">${esc(t("files.loadMore"))}</button>` : "");
 }
 const selectedOf = pane => [...pane.sel].sort((a, b) => a - b).map(i => pane.entries[i]).filter(Boolean);
 function select(pane, i, { toggle = false, range = false } = {}) {
@@ -294,6 +353,12 @@ async function copyEntry(pane, e, move) {
     return refreshPane(pane);
   }
 }
+// A file of this computer offered to a phone: a row of the queue from now on; the phone asks before it saves it.
+async function offerEntry(pane, e, phone) {
+  const r = await window.files.offer(phone.id, filePathOf(pane, e.name));
+  if (r.error) return toast(t("files.error", { computer: phone.name, message: r.message || r.error }), true);
+  toast(t("files.toPhone.sent", { name: e.name, phone: phone.name }));
+}
 // Always asked first, naming the computer and saying where it goes: its bin, or nowhere (docs/FILES.md 1).
 async function deleteEntries(pane, entries) {
   if (!entries.length) return;
@@ -383,6 +448,13 @@ function openFileMenu(pane, e, x, y) {
   // The pane's list has the keyboard again before an item runs: a dialog it opens gives the focus back there.
   const list = paneEl(pane).querySelector(".fpane-list");
   const run = fn => () => { list.focus(); return fn().catch(err => toast(err.message, true)); };
+  // To a phone: only a file of this computer (the phone pulls it from here), and only a phone linked now - with one,
+  // the item names it; with more, they are its submenu; with none, it says why it cannot.
+  const phones = filesPhones.filter(p => p.online);
+  const toPhone = pane.node || !one || one.dir ? [] : phones.length === 1
+    ? [{ label: t("files.menu.toPhoneNamed", { name: phones[0].name }), icon: "phone", run: run(() => offerEntry(pane, one, phones[0])) }]
+    : phones.length ? [{ label: t("files.menu.toPhone"), icon: "phone", items: phones.map(p => ({ label: p.name, icon: "phone", run: run(() => offerEntry(pane, one, p)) })) }]
+    : [{ label: t("files.menu.toPhone"), icon: "phone", disabled: true, detail: t(filesPhones.length ? "files.toPhone.offline" : "files.toPhone.none") }];
   const items = !e ? [
     { label: t("files.newFolder"), icon: "plus", disabled: !pane.path, run: run(() => makeFolder(pane)) },
     { label: t("files.refresh"), icon: "refresh", run: run(() => refreshPane(pane)) }
@@ -390,6 +462,7 @@ function openFileMenu(pane, e, x, y) {
     ...(one?.dir ? [{ label: t("files.menu.open"), icon: "folder", run: run(() => goTo(pane, filePathOf(pane, one.name))) }] : []),
     ...(one && !one.dir ? [{ label: t("files.menu.preview"), icon: "eye", run: run(() => previewEntry(pane, one)) }] : []),
     { label: t("files.menu.send", { name: other.name }), icon: pane.node ? "download" : "upload", disabled: Boolean(other.error) || !other.path, run: run(() => sendEntries(pane, picked)) },
+    ...toPhone,
     { separator: true },
     ...(one ? [
       { label: t("files.menu.rename"), icon: "pencil", run: run(() => renameEntry(pane, one)) },
@@ -416,7 +489,7 @@ function queueRowEl(r) {
   const who = s => `<b>${esc(s.name)}</b>${s.node ? "" : ` <small class="fq-here">(${esc(t("term.thisComputer"))})</small>`}`;
   const route = r.kind === "copy" ? esc(t(r.move ? "files.row.move" : "files.row.copy", { name: r.from.name }))
     : `${who(r.from)} <span class="fq-to">→</span> ${who(r.to)}`;
-  const dir = r.kind === "copy" ? "copy" : r.to.node === "" ? "download" : "upload";
+  const dir = r.kind === "copy" ? "copy" : r.kind === "offer" ? "phone" : r.to.node === "" ? "download" : "upload";
   el.innerHTML = `<span class="fq-icon">${icon(dir)}</span>
     <span class="fq-name" title="${esc(r.name)}">${esc(r.name)}</span>
     <span class="fq-route" title="${esc(r.kind === "copy" ? "" : `${r.from.name} → ${r.to.name}`)}">${route}</span>
@@ -437,15 +510,21 @@ function renderFilesQueue(list) {
     kept.delete(r.id);
     if (el === at) at = at.nextElementSibling; else box.insertBefore(el, at);
     const pct = r.total > 0 ? Math.min(100, Math.floor((r.bytes / r.total) * 100)) : r.state === "done" ? 100 : 0;
-    const live = r.state === "running" || r.state === "queued";
-    const state = r.state === "running" ? `${pct} %` : t(`files.state.${r.state}`);
+    const live = ["running", "queued", "waiting", "noAnswer"].includes(r.state);
+    // An offer's bytes move on the phone, out of sight: its row says what the phone answered, and Stop is there only
+    // while the phone has not taken it.
+    const offer = r.kind === "offer";
+    const state = r.state === "running" ? (offer ? t("files.state.saving") : `${pct} %`) : t(`files.state.${r.state}`);
+    const stoppable = offer ? r.state === "waiting" || r.state === "noAnswer" : live;
     const details = [
       r.state === "running" && r.current && r.count > 1 ? r.current : "",
       r.count > 1 ? t("files.row.files", { done: r.files, count: r.count }) : "",
-      r.total ? `${sizeText(r.bytes)} / ${sizeText(r.total)}` : "",
+      r.total ? (offer ? sizeText(r.total) : `${sizeText(r.bytes)} / ${sizeText(r.total)}`) : "",
       r.skipped ? t("files.row.skipped", { n: r.skipped }) : "",
       r.state === "done" && r.path && r.kind === "transfer" ? t("files.row.into", { path: r.path }) : "",
-      r.state === "failed" ? t("files.error", { computer: r.error === "offline" ? r.to.node ? r.to.name : r.from.name : r.from.name, message: r.message || t(`errors.${r.error}`) }) : ""
+      offer && (r.state === "noAnswer" || r.state === "expired") ? t("files.toPhone.noAnswer", { name: r.to.name }) : "",
+      offer && r.state === "declined" ? t("files.toPhone.declined", { name: r.to.name }) : "",
+      r.state === "failed" ? t("files.error", { computer: offer || (r.error === "offline" && r.to.node) ? r.to.name : r.from.name, message: r.message || fileErrorText(r.error) }) : ""
     ].filter(Boolean).join(" · ");
     el.className = `fq-row ${r.state}`;
     el.querySelector(".fq-bar").setAttribute("aria-valuenow", String(pct));
@@ -454,10 +533,16 @@ function renderFilesQueue(list) {
     const detail = el.querySelector(".fq-detail");
     detail.textContent = details;
     detail.title = details;
-    setHtml(el.querySelector(".fq-act"), live ? `<button class="btn sm" data-fa="stop">${esc(t("files.stop"))}</button>` : "");
+    setHtml(el.querySelector(".fq-act"), stoppable ? `<button class="btn sm" data-fa="stop">${esc(t("files.stop"))}</button>` : "");
   }
   for (const el of kept.values()) el.remove();
 }
+// A code as words; a code with none (a phone's may be newer than this app) as it is.
+function fileErrorText(code) {
+  const words = t(`errors.${code}`);
+  return words === `errors.${code}` ? code : words;
+}
+window.files?.onPhones?.(list =>{ filesPhones = Array.isArray(list) ? list : []; });
 // (A page without the bridge - a test's fixture of the window - has no queue to follow.)
 window.files?.onTransfers(list => {
   const before = new Map(filesQueue.map(r => [r.id, r.state]));
@@ -468,8 +553,34 @@ window.files?.onTransfers(list => {
   for (const pane of filesPanes) if (ended.some(r => r.to.node === pane.node || (r.kind === "copy" && r.from.node === pane.node))) refreshPane(pane);
 });
 
+// ---------- the order and the search ----------
+// The same column again: the other way round. Another: name A-Z, the newest or the largest first.
+function sortBy(pane, key) {
+  if (!SORTS.includes(key) || pane.path === null) return;
+  if (pane.sort === key) pane.desc = !pane.desc;
+  else Object.assign(pane, { sort: key, desc: key !== "name" });
+  saveSort(pane);
+  return goTo(pane, pane.path, [], { keep: true });
+}
+function filterNow(pane) {
+  clearTimeout(pane.timer);
+  const next = paneEl(pane).querySelector(".fpane-filter").value.trim().slice(0, 200);
+  paneEl(pane).querySelector('[data-fa="unfilter"]').hidden = !paneEl(pane).querySelector(".fpane-filter").value;
+  if (next === pane.filter || !pane.path) return;
+  pane.filter = next;
+  return goTo(pane, pane.path, [], { keep: true });
+}
+
 // ---------- the pointer and the keys ----------
 function wireFilesView(el) {
+  el.addEventListener("input", e => {
+    if (!e.target.classList?.contains("fpane-filter")) return;
+    const pane = paneOf(e.target);
+    if (!pane) return;
+    paneEl(pane).querySelector('[data-fa="unfilter"]').hidden = !e.target.value;
+    clearTimeout(pane.timer);
+    pane.timer = setTimeout(() => filterNow(pane), FILTER_MS);
+  });
   el.addEventListener("click", e => {
     const fa = e.target.closest("[data-fa]")?.dataset.fa, pane = paneOf(e.target);
     if (fa === "close") return closeFilesDialog();
@@ -482,6 +593,9 @@ function wireFilesView(el) {
     if (fa === "refresh") return refreshPane(pane);
     if (fa === "mkdir") return makeFolder(pane).catch(err => toast(err.message, true));
     if (fa === "more") return loadMore(pane);
+    if (fa === "unfilter") { const field = paneEl(pane).querySelector(".fpane-filter"); field.value = ""; field.focus(); return filterNow(pane); }
+    const col = e.target.closest(".fhead [data-sort]");
+    if (col && !col.disabled) return sortBy(pane, col.dataset.sort);
     const crumb = e.target.closest("[data-crumb]");
     if (crumb) return goTo(pane, pane.crumbs[Number(crumb.dataset.crumb)].path);
     const row = e.target.closest(".frow[data-i]");
@@ -542,6 +656,12 @@ function wireFilesView(el) {
     work.catch(err => toast(err.message, true));
   });
   el.addEventListener("keydown", e => {
+    // In a pane's search: Escape clears it (a second one, on an empty field, closes the dialog); Enter asks at once.
+    if (e.target.classList?.contains("fpane-filter")) {
+      const pane = paneOf(e.target);
+      if (e.key === "Enter") { e.preventDefault(); return void filterNow(pane); }
+      if (e.key === "Escape" && e.target.value) { e.preventDefault(); e.stopPropagation(); e.target.value = ""; return void filterNow(pane); }
+    }
     if (e.key === "Escape") {
       if (typeof groupMenu !== "undefined" && groupMenu) return;
       e.preventDefault();

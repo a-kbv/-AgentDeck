@@ -33,6 +33,20 @@
 .fcrumb-sep { color: var(--faint); }
 .frow { display: grid; grid-template-columns: minmax(0, 1fr) 84px 132px; align-items: center; gap: 8px; padding: 3px 10px; font-size: 13px; user-select: none; }
 .frow.fhead { padding-top: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--line); color: var(--faint); font-size: 11.5px; }
+/* The order (a column's head, its arrow) and the search by name, where that computer can do them (files-ui.js). */
+.fpane-find { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+.fpane-find[hidden] { display: none; }
+.fpane-search { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
+.fpane-search > .i { position: absolute; left: 8px; width: 14px; height: 14px; color: var(--faint); pointer-events: none; }
+.fpane-filter { width: 100%; height: 28px; padding: 3px 30px 3px 28px; font-size: 12.5px; }
+.fpane-search .icon-btn { position: absolute; right: 2px; width: 24px; height: 24px; }
+.fpane-count { flex: none; color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fcol { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: inherit; cursor: default; }
+.fcol.fsize, .fcol.ftime { justify-content: flex-end; }
+.fcol > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpane.sortable .fcol { cursor: pointer; }
+.fpane.sortable .fcol:hover, .fcol.on { color: var(--text); }
+.fsort { font-style: normal; font-size: 9px; color: var(--accent); }
 .fpane-list { flex: 1; min-height: 0; overflow: auto; outline: none; padding: 2px 0 6px; }
 .fpane-list .frow { cursor: default; border-radius: 0; }
 .fpane-list .frow:hover { background: var(--card-hover); }
@@ -89,6 +103,9 @@
 .fq-row.failed .fq-state { color: var(--danger); }
 .fq-detail { grid-column: 2 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 11.5px; }
 .fq-row.failed .fq-detail { color: var(--danger); }
+/* A file sent to a phone (an offer): no answer said in the colour of what waits for the user; declined quietly. */
+.fq-row.noAnswer .fq-state, .fq-row.expired .fq-state, .fq-row.noAnswer .fq-detail, .fq-row.expired .fq-detail { color: var(--wait); }
+.fq-row.declined .fq-bar i, .fq-row.expired .fq-bar i { background: var(--faint); }
 
 /* A text, .md or picture shown in the dialog. */
 .files-preview { width: min(900px, calc(100vw - 48px)); height: min(760px, calc(100vh - 48px)); }
