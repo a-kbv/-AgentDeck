@@ -5,44 +5,10 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
-const { spawn } = require("node:child_process");
 const esbuild = require("../mobile/node_modules/esbuild");
-const { CdpConnection, activeEndpoint } = require("../src/host/browser-cdp");
 const { createBrowser } = require("../src/host/browser");
-const { withPhone, waitFor, sleep } = require("./browser-test-rig");
+const { withPhone, waitFor, sleep, chromePath, launch, session } = require("./browser-test-rig");
 
-async function chromePath() {
-  const candidates = [process.env.AGENTDECK_TEST_CHROME,
-    ...(process.platform === "win32" ? [path.join(process.env.PROGRAMFILES || "C:/Program Files", "Google/Chrome/Application/chrome.exe"), path.join(process.env.LOCALAPPDATA || "", "Google/Chrome/Application/chrome.exe")]
-      : process.platform === "darwin" ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"] : ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"])].filter(Boolean);
-  for (const p of candidates) { try { await fs.access(p); return p; } catch {} }
-  throw new Error("Chrome is required. Set AGENTDECK_TEST_CHROME to its executable.");
-}
-async function launch(executable, dir) {
-  await fs.mkdir(dir, { recursive: true });
-  const child = spawn(executable, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--remote-debugging-port=0", `--user-data-dir=${dir}`, "--window-size=1100,800", "about:blank"], { windowsHide: true, stdio: "ignore" });
-  let endpoint;
-  await waitFor(async () => {
-    if (child.exitCode !== null) throw new Error(`Test Chrome exited (${child.exitCode})`);
-    try { endpoint = activeEndpoint(await fs.readFile(path.join(dir, "DevToolsActivePort"), "utf8")); return endpoint; } catch { return false; }
-  }, "test Chrome starts");
-  const control = new CdpConnection(endpoint);
-  await control.ready;
-  return { control, endpoint, child, async stop() {
-    try { await control.send("Browser.close"); } catch {}
-    control.close();
-    await waitFor(() => child.exitCode !== null, "test Chrome stops", 5000).catch(() => child.kill());
-  } };
-}
-async function session(control, url) {
-  const { targetId } = await control.send("Target.createTarget", { url });
-  const { sessionId } = await control.send("Target.attachToTarget", { targetId, flatten: true });
-  return { targetId, send: (m, p = {}) => control.send(m, p, sessionId), eval: async expression => {
-    const r = await control.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, sessionId);
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + ": " + r.exceptionDetails.exception?.description);
-    return r.result.value;
-  } };
-}
 async function main() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agentdeck-browser-live-")), browsers = [];
   let server, gateway;

@@ -2,7 +2,8 @@
 // that folds its sessions open and shut, those that need the user or run first, with "New session here" and
 // "Terminal here" at its end - the sessions in folders that are no project, and every terminal running there (its
 // own: a shell pane on its desktop, an agent's terminal; those this phone opened; those other devices opened), each
-// to open or close. In the header: a new terminal in its home folder, and Forget. params: node.
+// to open or close. In the header: a new terminal in its home folder, its browser, its files (from its home), and
+// Forget. params: node.
 import { t, tn, errorText } from "../i18n.js";
 import { esc, baseName, normPath } from "../util.js";
 import { icon, iconBtn } from "../icons.js";
@@ -63,6 +64,7 @@ export function render(el, ctx, p) {
       sub: esc(`${t(`computers.kind.${n.kind}`)}${n.version ? ` ${n.version}` : ""} · ${how(n)}`),
       actions: (n.online && home ? iconBtn("termPlus", t("node.newShell"), 'data-act="shell"') : "")
         + (n.online ? iconBtn("globe", t("browser.title"), 'data-act="browser"') : "")
+        + (n.online ? iconBtn("folder", t("files.title"), 'data-act="files"') : "")
         + iconBtn("trash", t("computers.forgetName", { name: n.name }), 'data-act="forget"', "danger")
     });
     wireBack(head, ctx);
@@ -97,6 +99,7 @@ export function render(el, ctx, p) {
     const n = nodeOf();
     if (b.dataset.act === "shell") shell(store.node(p.node)?.info?.home, n?.name);
     else if (b.dataset.act === "browser") ctx.go("browser", { node: p.node });
+    else if (b.dataset.act === "files") ctx.go("files", { node: p.node, path: "~" });
     else if (b.dataset.act === "forget" && n) {
       if (!await ctx.confirm(t("computers.forgetAsk", { name: n.name }), t("computers.forget"), { danger: true })) return;
       try { await store.forget(p.node); ctx.toast(t("computers.forgotten", { name: n.name })); } catch (err) { ctx.fail(err); }

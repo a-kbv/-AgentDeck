@@ -1,15 +1,18 @@
-// A real phone provider -> encrypted relay -> served desktop. No Chrome/profile is started by this rig.
+// A real phone provider -> encrypted relay -> served desktop; and a test Chrome with a temporary profile for the tests
+// that drive a page (never the user's Chrome or profile).
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const net = require("node:net");
 const { pathToFileURL } = require("node:url");
+const { spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const { WebSocket } = require("ws");
 const { createLinks } = require("../src/mesh/links");
 const { createServed } = require("../src/mesh/serve");
 const noise = require("../src/mesh/noise");
 const pairCode = require("../src/mesh/pair-code");
+const { CdpConnection, activeEndpoint } = require("../src/host/browser-cdp");
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(fn, label, ms = 15000) {
@@ -18,6 +21,41 @@ async function waitFor(fn, label, ms = 15000) {
   throw new Error(`Timed out: ${label}`);
 }
 const freePort = () => new Promise(resolve => { const s = net.createServer().listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
+
+// A test Chrome of its own: headless, a temporary profile in `dir` - never the user's Chrome, tabs or settings.
+async function chromePath() {
+  const candidates = [process.env.AGENTDECK_TEST_CHROME,
+    ...(process.platform === "win32" ? [path.join(process.env.PROGRAMFILES || "C:/Program Files", "Google/Chrome/Application/chrome.exe"), path.join(process.env.LOCALAPPDATA || "", "Google/Chrome/Application/chrome.exe")]
+      : process.platform === "darwin" ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"] : ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"])].filter(Boolean);
+  for (const p of candidates) { try { await fs.promises.access(p); return p; } catch {} }
+  throw new Error("Chrome is required. Set AGENTDECK_TEST_CHROME to its executable.");
+}
+async function launch(executable, dir) {
+  await fs.promises.mkdir(dir, { recursive: true });
+  const child = spawn(executable, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--remote-debugging-port=0", `--user-data-dir=${dir}`, "--window-size=1100,800", "about:blank"], { windowsHide: true, stdio: "ignore" });
+  let endpoint;
+  await waitFor(async () => {
+    if (child.exitCode !== null) throw new Error(`Test Chrome exited (${child.exitCode})`);
+    try { endpoint = activeEndpoint(await fs.promises.readFile(path.join(dir, "DevToolsActivePort"), "utf8")); return endpoint; } catch { return false; }
+  }, "test Chrome starts");
+  const control = new CdpConnection(endpoint);
+  await control.ready;
+  return { control, endpoint, child, async stop() {
+    try { await control.send("Browser.close"); } catch {}
+    control.close();
+    await waitFor(() => child.exitCode !== null, "test Chrome stops", 5000).catch(() => child.kill());
+  } };
+}
+// A new tab of that Chrome, attached: send(method, params) and eval(expression) -> its value.
+async function session(control, url) {
+  const { targetId } = await control.send("Target.createTarget", { url });
+  const { sessionId } = await control.send("Target.attachToTarget", { targetId, flatten: true });
+  return { targetId, sessionId, send: (m, p = {}) => control.send(m, p, sessionId), eval: async expression => {
+    const r = await control.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, sessionId);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + ": " + r.exceptionDetails.exception?.description);
+    return r.result.value;
+  } };
+}
 function makeHost() {
   const data = { registry: { projects: [] }, sessions: [], agents: [], at: Date.now() };
   return Object.assign(new EventEmitter(), {
@@ -26,7 +64,7 @@ function makeHost() {
     home: os.homedir(), tabs: () => [], liveSessions: async () => []
   });
 }
-async function withPhone(browser, run) {
+async function withPhone(browser, run, servedOpts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentdeck-browser-mesh-"));
   const nodes = [], phones = [];
   const node = async (name, opts = {}) => {
@@ -36,7 +74,7 @@ async function withPhone(browser, run) {
     const n = createLinks({ dir, defaultName: name, version: "test", kind: "desktop", discover: false, log: () => {}, ...opts });
     nodes.push(n); await n.start(); return n;
   };
-  const served = createServed({ host: makeHost(), browser });
+  const served = createServed({ host: Object.assign(makeHost(), servedOpts.host || {}), browser, ...(servedOpts.served || {}) });
   try {
     const relay = await node("relay", { kind: "host", relayOnly: true });
     const host = await node("desktop", { api: served.api });
@@ -53,7 +91,7 @@ async function withPhone(browser, run) {
     const paired = await phone.pairAll(payload);
     if (!paired.every(x => x.state === "paired")) throw new Error(`Pairing failed: ${JSON.stringify(paired)}`);
     await waitFor(() => phone.online(host.self().id), "phone -> relay -> desktop");
-    const call = (method, params = {}) => phone.request(host.self().id, `browser.${method}`, params, { timeout: 20000 });
+    const call = (method, params = {}) => phone.request(host.self().id, method.includes(".") ? method : `browser.${method}`, params, { timeout: 20000 });
     await run({ call, phone, host, relay, served, node });
   } finally {
     for (const phone of phones) phone.stop();
@@ -63,4 +101,4 @@ async function withPhone(browser, run) {
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
-module.exports = { withPhone, waitFor, sleep, freePort };
+module.exports = { withPhone, waitFor, sleep, freePort, chromePath, launch, session };

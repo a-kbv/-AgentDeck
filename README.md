@@ -444,8 +444,12 @@ A dev server started in a remote terminal listens on that computer's `localhost`
 
 The phone's **Browser** button controls the computer's **existing Chrome tabs**, including signing in when an agent needs your help. Open it from a computer, a session, or the terminal's **More → Browser** menu. Enable Remote Debugging in Chrome 144+ and approve the initial connection on the computer first. You can tap, type, scroll, zoom, navigate and open tabs; leaving the view keeps the tab and its login on the computer. See [setup and limitations](docs/BROWSER.md).
 
+### Files of the other computer
+
+The **Files** button in a remote terminal's header opens two panes: this computer on the left, starting in Downloads, and the terminal's computer on the right, starting in the terminal's folder — each pane says which computer it is. Drag between the panes, double-click a file or use the arrows to copy files and whole folders either way; the queue shows every transfer as "from → to" with progress and **Stop**. Right-click for preview (text, Markdown, pictures; PDFs open in your PDF program), rename, copy, move, new folder and delete (always confirmed, into the Recycle Bin where that computer has one). Nothing is ever overwritten: a taken name becomes `name (2)`, and an unfinished file never carries its real name. Both computers need a version that has the button.
+
 > [!IMPORTANT]
-> Pairing grants meaningful control: a paired computer or phone can launch terminals and sessions on the host, type into the ones running there and open the ports that listen on its `localhost`. Pair only your own devices, and keep a desktop's mesh port off the public internet — the port meant to be reachable from outside is the relay's.
+> Pairing grants meaningful control: a paired computer or phone can launch terminals and sessions on the host, type into the ones running there, open the ports that listen on its `localhost`, and read, copy, change and delete its files wherever its user may. Pair only your own devices, and keep a desktop's mesh port off the public internet — the port meant to be reachable from outside is the relay's.
 
 ## Linux headless host
 

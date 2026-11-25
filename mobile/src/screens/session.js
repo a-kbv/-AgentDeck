@@ -49,6 +49,7 @@ export function render(el, ctx, p) {
     const canResume = x && !x.term && x.online && x.status === "stopped";
     const actions = [
       x?.online ? iconBtn("globe", t("browser.title"), 'data-act="browser"') : "",
+      x?.online ? iconBtn("folder", t("files.title"), 'data-act="files"') : "",
       x?.online && x.cwd ? iconBtn("termPlus", t("session.shell"), 'data-act="shell"') : "",
       x?.online && x.term ? iconBtn("terminal", t("session.terminal"), 'data-act="term"') : "",
       canStop ? iconBtn("stop", t("session.stop"), 'data-act="stop"', "danger") : "",
@@ -63,6 +64,8 @@ export function render(el, ctx, p) {
     on("term", () => (p.from === "terminal" ? ctx.back() : ctx.go("terminal", { node: x.node, term: x.term, title: x.title })));
     on("shell", openShell);
     on("browser", () => ctx.go("browser", { node: p.node }));
+    // The session's folder there (its home when the folder is not known).
+    on("files", () => ctx.go("files", { node: p.node, path: x.cwd || "~" }));
     on("stop", stop);
     on("resume", resume);
     conn.innerHTML = connNote(store);

@@ -217,7 +217,8 @@ export function render(el, ctx, p) {
       if (tab?.id) ctx.go("terminal", { node: p.node, term: tab.id, title: tab.title || baseName(cwd) });
     } catch (e) { ctx.fail(e); }
   }
-  // "More": what is used now and then - the size, the text's size, copying, the chat view, a shell here, Ports, Stop.
+  // "More": what is used now and then - the size, the text's size, copying, the chat view, a shell here, Ports, the
+  // browser, the files in this terminal's folder, Stop.
   async function more() {
     const x = sessionOf(), mine = isMine(), cwd = x?.cwd || store.tab(p.node, p.term)?.cwd || "";
     const pick = await ctx.menu([
@@ -230,6 +231,7 @@ export function render(el, ctx, p) {
       // Only where the app can listen (its Forward plugin: not in a browser); lit while this computer has a forward.
       ctx.forwards?.available ? { key: "ports", icon: "globe", label: t("ports.title"), on: ctx.forwards.list().some(f => f.node === p.node) } : null,
       { key: "browser", icon: "globe", label: t("browser.title") },
+      handle?.online ? { key: "files", icon: "folder", label: t("files.title") } : null,
       { key: "stop", icon: x ? "stop" : "power", label: x ? t("term.stopSession") : t("term.close"), danger: true }
     ].filter(Boolean));
     if (closed) return;
@@ -240,6 +242,7 @@ export function render(el, ctx, p) {
     else if (pick === "shell") shellHere(cwd);
     else if (pick === "ports") openPorts(ctx, { node: p.node, term: p.term, cwd });
     else if (pick === "browser") ctx.go("browser", { node: p.node });
+    else if (pick === "files") ctx.go("files", { node: p.node, path: cwd || "~" });
     else if (pick === "stop") stop();
   }
   // The terminal's text: the lines in view (count 0), or the last `count` lines of everything it holds; a line the

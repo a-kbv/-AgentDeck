@@ -37,6 +37,7 @@ const { createPortStreams } = require("../host/port-streams");
 const { resolveFolder } = require("../host/project-folder");
 const { getProject, addProject } = require("../host/registry");
 const { createBrowser } = require("../host/browser");
+const { createFiles } = require("../host/files");
 // The most of one message a peer may ask sessions.preview for. A preview is six messages: at this bound it is at
 // most about 100 000 characters (a few hundred kilobytes for text that is not Latin) - still quick over a mobile
 // link, which carries it through the relay in 32 KB pieces - and all but the longest answers fit whole.
@@ -59,11 +60,13 @@ const dim = v => {
 // host: host/index.js (equipTerminals: terminals, launch, viewers, tabs(), liveSessions()); env(): the environment
 // for a terminal opened for a peer (a promise; with the proxy, on a desktop); info(): what host.info adds (the node's
 // own description comes from the links); liveMs: how often the live status is looked at for the peers.
-function createServed({ host, env = async () => terminalEnv(process.env), info = () => ({}), liveMs = LIVE_MS, browser = createBrowser() }) {
+function createServed({ host, env = async () => terminalEnv(process.env), info = () => ({}), liveMs = LIVE_MS, browser = createBrowser(), trash = null }) {
   const { terminals, launch, sendText, sessions, git, setup, viewers } = host;
   const path = require("node:path");
   const fs = require("node:fs");
   let links = null, layout = null, lagTimer = null;
+  // The files of this computer for the peers (docs/FILES.md); trash: the system's bin, where there is one.
+  const files = createFiles({ home: host.home, trash, notify: (peer, name, data) => links?.notify(peer, name, data) });
   const ctl = new Set();      // peers that made a terminals or ports request on their current link: their frames are taken
   const behind = new Map();   // peer id -> Set of terminal ids whose output it is behind on
   const ports = createPortStreams({
@@ -122,8 +125,10 @@ function createServed({ host, env = async () => terminalEnv(process.env), info =
   const METHODS = {
     // terminals: 2 - this host shares its terminals as docs/SHARED-SESSIONS.md 4 says (viewers, driver, resize).
     // ports: 1 - it forwards its loopback ports (ports.*, docs/PORT-FORWARDING.md).
+    // files: 1 - its files are listed, read, changed and taken (files.*, docs/FILES.md); trash: 1 - what is
+    // deleted goes to the system's bin, 0 - for good.
     // projects: 1 - it takes a folder of its own as a project from a peer (projects.add).
-    "host.info": () => ({ ...(links?.self() || {}), code: undefined, platform: process.platform, home: host.home, agents: sessions.get()?.agents || [], terminals: 2, ports: 1, projects: 1, browser: 1, ...info() }),
+    "host.info": () => ({ ...(links?.self() || {}), code: undefined, platform: process.platform, home: host.home, agents: sessions.get()?.agents || [], terminals: 2, ports: 1, projects: 1, browser: 1, files: 1, trash: files.hasTrash ? 1 : 0, ...info() }),
     // {path}: a folder of this computer listed as a project here, so a peer has somewhere to work on a computer that
     // lists nothing yet. The path is the peer's own typing (it sees none of the folders here): project-folder.js takes
     // it only when it is a whole path to a folder that exists (folderNotAbsolute, folderMissing, notFolder). Nothing
@@ -262,6 +267,21 @@ function createServed({ host, env = async () => terminalEnv(process.env), info =
     // stream's bytes then pass as frames (port-streams.js: refused, notAllowed, tooManyStreams, invalidData).
     "ports.open": (p, peer) => ports.open(peer.id, p?.stream, p?.port),
     "ports.close": (p, peer) => { ports.close(peer.id, str(p?.stream, 36)); return true; },
+    // This computer's files (host/files.js says what each takes and answers). A copy is a job of the peer that began
+    // it; an upload is that peer's too and goes with its link.
+    "files.list": p => files.list(p),
+    "files.stat": p => files.stat(p),
+    "files.read": p => files.read(p),
+    "files.mkdir": p => files.mkdir(p),
+    "files.rename": p => files.rename(p),
+    "files.delete": p => files.remove(p),
+    "files.copy": (p, peer) => files.copy(peer.id, p),
+    "files.job": (p, peer) => files.job(peer.id, p),
+    "files.cancel": (p, peer) => files.cancel(peer.id, p),
+    "files.begin": (p, peer) => files.begin(peer.id, p),
+    "files.write": (p, peer) => files.write(peer.id, p),
+    "files.commit": (p, peer) => files.commit(peer.id, p),
+    "files.abort": (p, peer) => files.abort(peer.id, p),
     "browser.list": (p, peer) => browser.list(peer.id),
     "browser.attach": (p, peer) => browser.attach(peer.id, p),
     "browser.frame": (p, peer) => browser.frame(peer.id, p),
@@ -384,11 +404,12 @@ function createServed({ host, env = async () => terminalEnv(process.env), info =
       behind.delete(node);
       ports.drop(node);
       browser.drop(node);
+      files.drop(node);
       viewers.leave(node);
     });
   }
 
-  return { api, attach, ports, browser, get layout() { return layout; } };
+  return { api, attach, ports, browser, files, get layout() { return layout; } };
 }
 
 module.exports = { createServed };

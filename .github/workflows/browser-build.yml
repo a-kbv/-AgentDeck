@@ -30,6 +30,8 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run test:browser
+      - run: npm run test:files
+      - run: npm run test:mobile-files
       - run: npm run test:mobile-i18n
       - name: Set test version
         run: npm version "$env:BUILD_VERSION" --no-git-tag-version --allow-same-version
@@ -75,6 +77,8 @@ jobs:
       - run: npm ci
         working-directory: mobile
       - run: npm run test:browser
+      - run: npm run test:files
+      - run: npm run test:mobile-files
       - run: npm run test:mobile-i18n
       - name: Build side-by-side test APK
         working-directory: mobile

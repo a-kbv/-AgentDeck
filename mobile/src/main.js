@@ -27,8 +27,9 @@ import * as newScreen from "./screens/new-session.js";
 import * as computersScreen from "./screens/computers.js";
 import * as nodeScreen from "./screens/node.js";
 import * as browserScreen from "./screens/browser.js";
+import * as filesScreen from "./screens/files.js";
 
-const SCREENS = { pair: pairScreen, pairing: pairingScreen, routes: routesScreen, scan: scanScreen, diag: diagScreen, inbox: inboxScreen, session: sessionScreen, terminal: terminalScreen, browser: browserScreen, new: newScreen, computers: computersScreen, node: nodeScreen };
+const SCREENS = { pair: pairScreen, pairing: pairingScreen, routes: routesScreen, scan: scanScreen, diag: diagScreen, inbox: inboxScreen, session: sessionScreen, terminal: terminalScreen, browser: browserScreen, files: filesScreen, new: newScreen, computers: computersScreen, node: nodeScreen };
 const TABS = ["inbox", "new", "computers"];
 const META_KEY = "agentdeck.nodes"; // provider-relay.js meta: which nodes are relays, when each was last seen (not secret)
 
@@ -155,15 +156,16 @@ function menuSheet(items) {
   });
 }
 
-// promptSheet(title, value, okLabel, { multiline }) -> the text, or null when cancelled. multiline: a few lines of
-// any length (text to paste into a terminal), kept as typed; else one short line, trimmed.
-function promptSheet(title, value, okLabel, { multiline = false } = {}) {
+// promptSheet(title, value, okLabel, { multiline, maxLength }) -> the text, or null when cancelled. multiline: a few
+// lines of any length (text to paste into a terminal), kept as typed; else one line, trimmed, of at most maxLength
+// characters (a name: 60; a file's name there: 255).
+function promptSheet(title, value, okLabel, { multiline = false, maxLength = 60 } = {}) {
   return new Promise(resolve => {
     const el = document.createElement("div");
     el.className = "sheet-backdrop";
     el.innerHTML = `<form class="sheet" role="dialog" aria-modal="true"><p>${esc(title)}</p>
       ${multiline ? `<textarea class="sheet-input" rows="4" autocomplete="off" autocapitalize="off" spellcheck="false">${esc(value)}</textarea>`
-        : `<input class="sheet-input" maxlength="60" autocomplete="off" value="${esc(value)}">`}
+        : `<input class="sheet-input" maxlength="${maxLength}" autocomplete="off" value="${esc(value)}">`}
       <div class="sheet-actions"><button class="btn" type="button" data-v="0">${esc(t("common.cancel"))}</button>
       <button class="btn primary" type="submit">${esc(okLabel)}</button></div></form>`;
     const input = el.querySelector(".sheet-input");
