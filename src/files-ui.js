@@ -163,7 +163,9 @@ async function goTo(pane, path, fallback = [], { keep = false } = {}) {
   if (!keep && pane.filter) { pane.filter = ""; paneEl(pane).querySelector(".fpane-filter").value = ""; }
   pane.loading = true;
   renderPane(pane);
+  const asked = pane.asked = (pane.asked || 0) + 1;
   const r = await window.files.call(pane.node, "list", { path, ...listParams(pane, path) });
+  if (asked !== pane.asked) return false;   // a later request took over: this answer is of an older question
   pane.loading = false;
   if (r.error) {
     if (fallback.length && r.error !== "offline" && r.error !== "unknownMethod") return goTo(pane, fallback[0], fallback.slice(1));
@@ -185,7 +187,9 @@ const refreshPane = pane => (pane.path === null ? Promise.resolve(false) : goTo(
 async function loadMore(pane) {
   if (!pane.next || pane.loading) return;
   pane.loading = true;
+  const asked = pane.asked;
   const r = await window.files.call(pane.node, "list", { path: pane.path, after: pane.next, ...listParams(pane, pane.path) });
+  if (asked !== pane.asked) return;         // the folder, order or search changed meanwhile: not a page of what is shown
   pane.loading = false;
   if (r.error) return filesFailed(pane, r);
   if (r.value.path !== pane.path) return;

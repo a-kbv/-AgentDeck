@@ -221,6 +221,7 @@ function offerHeard({ node, event, payload }) {
   if (event !== "files.offer" || !store) return;
   const offer = checkOffer(payload);
   if (!offer) return;
+  if (offersWaiting.length >= 10) offersWaiting.shift();
   offersWaiting.push({ node, offer });
   nextOffer();
 }

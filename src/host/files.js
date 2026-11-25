@@ -15,7 +15,7 @@
 //
 // Errors are HostError codes the other side translates: invalidData, folderNotAbsolute, fileMissing, notFile,
 // notFolder, exists, fileDenied, changed, crossDevice, rootRefused, intoItself, tooManyJobs, jobMissing, diskFull,
-// fileFailed.
+// sourceLeft (a move that copied everything and could not remove all of the source: the copy stays), fileFailed.
 //
 // createFiles({ home, trash, notify }) - trash(path): moves it to the system's bin (a promise), absent on a host
 // without one: there a delete is for good; notify(peer, name, data): an event to that peer ("files.job" when a copy
@@ -62,26 +62,55 @@ function numbered(file, n, dir) {
   const ext = dir ? "" : path.extname(file);
   return path.join(path.dirname(file), `${path.basename(file, ext)} (${n})${ext}`);
 }
-// file when nothing has that name, else the first numbered name that is free.
-async function freeName(file, dir) {
-  if (!(await lstat(file)) && !(await lstat(file + PART))) return file;
-  for (let n = 2; n < 1000; n++) {
-    const next = numbered(file, n, dir);
-    if (!(await lstat(next)) && !(await lstat(next + PART))) return next;
+// A name that is free, taken at once so that no one else gets it between the look and the use: a folder is made, for
+// a file its PART is. -> the name: `wanted`, or the first numbered one.
+async function reserve(wanted, dir) {
+  for (let n = 1; n < 1000; n++) {
+    const name = n === 1 ? wanted : numbered(wanted, n, dir);
+    if (await lstat(name) || await lstat(name + PART)) continue;
+    try {
+      if (dir) await fsp.mkdir(name);
+      else await (await fsp.open(name + PART, "wx")).close();
+      return name;
+    } catch (e) { if (e?.code !== "EEXIST") failed(e); }
+  }
+  return fail("exists");
+}
+// A finished file gets its name without taking another's: a hard link fails when the name is there, where a rename
+// would write over it. A volume without links gets a copy that refuses a name that is there. Throws EEXIST.
+async function place(part, dst) {
+  try { await fsp.link(part, dst); } catch (e) {
+    if (e?.code === "EEXIST") throw e;
+    await fsp.copyFile(part, dst, fs.constants.COPYFILE_EXCL);
+  }
+  await fsp.rm(part, { force: true }).catch(() => {});
+}
+// The same for a file whose name may have been taken since it was reserved: the next numbered one. -> the name.
+async function settle(part, wanted) {
+  for (let n = 1; n < 1000; n++) {
+    const name = n === 1 ? wanted : numbered(wanted, n, false);
+    try { await place(part, name); return name; } catch (e) { if (e?.code !== "EEXIST") failed(e); }
   }
   return fail("exists");
 }
 
-function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
+// rm(path): how a moved thing's source is removed - the tests' way to make that fail.
+function createFiles({ home = "", trash = null, notify = () => {}, rm = p => fsp.rm(p, { recursive: true }) } = {}) {
   const jobs = new Map();     // id -> job
   const uploads = new Map();  // id -> upload
+  // How many a peer has going, counted before anything is waited for: requests sent together must not all get in.
+  const jobSlots = new Map(), uploadSlots = new Map();
+  const take = (slots, peer, max) => { if ((slots.get(peer) || 0) >= max) fail("tooManyJobs"); slots.set(peer, (slots.get(peer) || 0) + 1); };
+  const release = (slots, peer) => { const n = (slots.get(peer) || 1) - 1; if (n > 0) slots.set(peer, n); else slots.delete(peer); };
 
   // ---------- paths ----------
   // The other side's path, whole and tidied. Nothing is looked at on the disk.
   function whole(input) {
     if (typeof input !== "string" || input.length > MAX_PATH || input.includes("\0")) fail("invalidData");
-    const typed = input.trim();
-    if (!typed) fail("invalidData");
+    // As it was typed: a name may end in a blank, and "foo " is not "foo". A path that goes round the names' rules
+    // (\\?\, \\.\) is not taken: the same folder under it would pass every look at what it is.
+    const typed = input;
+    if (!typed.trim() || (process.platform === "win32" && /^[\\/]{2}[?.][\\/]/.test(typed))) fail("invalidData");
     const tilde = typed === "~" || typed.startsWith("~/") || typed.startsWith("~\\");
     if (tilde && !home) fail("fileMissing");
     const full = tilde ? path.join(home, typed.slice(2)) : typed;
@@ -171,6 +200,9 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
   // answered, a file that is no longer that one is refused (`changed`): its pieces must not be put together.
   async function read(p) {
     const file = whole(p?.path), pos = int(p?.pos, 0, MAX_SIZE), len = int(p?.len, 1, CHUNK);
+    // Looked at before it is opened: opening a pipe would wait for its other end.
+    const pre = await fsp.stat(file).catch(failed);
+    if (!pre.isFile()) fail(pre.isDirectory() ? "notFile" : "fileDenied");
     const fh = await fsp.open(file, "r").catch(failed);
     try {
       const st = await fh.stat();
@@ -194,23 +226,41 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
       }
     }
   }
+  // What a path leads to, for the looks that must not be passed with another spelling of it (a short name, a link).
+  const realOf = p => fsp.realpath(p).catch(() => p);
   // {from, to} -> { path }: a new name, or another folder of the same volume.
   async function rename(p) {
     const from = whole(p?.from), to = whole(p?.to);
-    if (isRoot(from)) fail("rootRefused");
-    const st = await fsp.lstat(from).catch(failed);
+    const st = await fsp.lstat(from, { bigint: true }).catch(failed);
+    if (isRoot(from) || (!st.isSymbolicLink() && isRoot(await realOf(from)))) fail("rootRefused");
     if (st.isDirectory() && !same(from, to) && inside(from, to)) fail("intoItself");
     await folderOf(to);
-    // Only a change of letters' case leads to the same file where names are told apart without it.
-    if (await lstat(to) && !(same(from, to) && from !== to)) fail("exists");
+    // The same file under another spelling - only the letters' case changed, where names are told apart without it -
+    // is no one else's. Told by what the disk says the two are, not by the names: a folder may tell them apart.
+    const there = await fsp.lstat(to, { bigint: true }).catch(() => null);
+    if (there && !(there.ino && there.ino === st.ino && there.dev === st.dev)) fail("exists");
+    if (!there && st.isFile()) {
+      // A file gets its new name as a link first: that fails on a name which appeared since the look, a rename would
+      // write over it. Where the volume has no links the rename below is all there is.
+      let linked = false;
+      try { await fsp.link(from, to); linked = true; } catch (e) { if (e?.code === "EEXIST") fail("exists"); }
+      if (linked) {
+        try { await fsp.unlink(from); } catch (e) { await fsp.unlink(to).catch(() => {}); failed(e); }
+        return { path: to };
+      }
+    }
     await fsp.rename(from, to).catch(failed);
     return { path: to };
   }
   // {path} -> { trashed }: into the bin where this computer has one, else for good. A link goes, not what it leads to.
   async function remove(p) {
     const file = whole(p?.path);
-    if (isRoot(file) || (home && same(file, path.resolve(home)))) fail("rootRefused");
-    await fsp.lstat(file).catch(failed);
+    const st = await fsp.lstat(file).catch(failed);
+    // A volume, the home, and whatever holds the home - under any spelling. A link is only itself: it goes, not
+    // what it leads to.
+    const real = st.isSymbolicLink() ? file : await realOf(file);
+    const homes = home ? [path.resolve(home), await realOf(home)] : [];
+    if (isRoot(file) || isRoot(real) || homes.some(h => inside(file, h) || inside(real, h))) fail("rootRefused");
     if (trash) {
       await Promise.resolve().then(() => trash(file)).catch(e => fail("fileFailed", String(e?.message || e)));
       return { trashed: true };
@@ -233,9 +283,12 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
     if (isRoot(real) || chain.some(x => same(x, real))) return;
     for (const name of await fsp.readdir(src).catch(() => [])) await measure(j, path.join(src, name), [...chain, real]);
   }
-  async function copyFile(j, src, dst) {
+  // top: the job's own target, whose PART was reserved when the job began and whose name may be numbered again.
+  async function copyFile(j, src, dst, top) {
     const part = dst + PART;
-    const [from, to] = await Promise.all([fsp.open(src, "r"), fsp.open(part, "w")]).catch(failed);
+    const from = await fsp.open(src, "r").catch(failed);
+    let to;
+    try { to = await fsp.open(part, top ? "r+" : "wx"); } catch (e) { await from.close().catch(() => {}); return failed(e); }
     try {
       for (let pos = 0; ;) {
         stopped(j);
@@ -250,52 +303,78 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
       await fsp.rm(part, { force: true }).catch(() => {});
       return failed(e);
     }
-    await Promise.all([from.close(), to.close()]);
-    await fsp.rename(part, dst).catch(failed);
+    await Promise.all([from.close(), to.close()].map(x => x.catch(() => {})));
+    try {
+      if (top) { j.to = await settle(part, dst); j.placed = true; }
+      else await place(part, dst);
+    } catch (e) {
+      await fsp.rm(part, { force: true }).catch(() => {});
+      return failed(e);
+    }
     j.files++;
   }
-  async function copyTree(j, src, dst, chain) {
+  async function copyTree(j, src, dst, chain, top) {
     stopped(j);
     const st = await fsp.stat(src).catch(() => null);
     if (!st) { j.skipped++; return; }                     // a link that leads nowhere, or one that went meanwhile
-    if (st.isFile()) return copyFile(j, src, dst);
+    if (st.isFile()) return copyFile(j, src, dst, top);
     if (!st.isDirectory()) { j.skipped++; return; }
-    const real = await fsp.realpath(src).catch(() => src);
-    if (isRoot(real) || chain.some(x => same(x, real))) { j.skipped++; return; }
-    await fsp.mkdir(dst).catch(failed);
-    for (const name of await fsp.readdir(src).catch(failed)) await copyTree(j, path.join(src, name), path.join(dst, name), [...chain, real]);
+    const real = await realOf(src);
+    // Not a volume, not a folder it is already inside, and not the copy itself (reached by a link, it would never end).
+    if (isRoot(real) || chain.some(x => same(x, real)) || (j.toReal && same(real, j.toReal))) { j.skipped++; return; }
+    if (!top) await fsp.mkdir(dst).catch(failed);         // the job's own folder was made when its name was taken
+    for (const name of await fsp.readdir(src).catch(failed)) await copyTree(j, path.join(src, name), path.join(dst, name), [...chain, real], false);
   }
   async function runJob(j) {
+    // Once the source of a move begins to go, the copy is all there is of what went: it stays, whatever happens.
+    let kept = false;
     try {
       await measure(j, j.from, []);
-      await copyTree(j, j.from, j.to, []);
+      await copyTree(j, j.from, j.to, [], true);
       if (j.move) {
         stopped(j);
-        await fsp.rm(j.from, { recursive: true }).catch(failed);
+        // What was skipped was not copied: the source stays, it is the only place that has it. So does the copy.
+        if (j.skipped) { kept = true; fail("sourceLeft"); }
+        kept = true;
+        await Promise.resolve().then(() => rm(j.from)).catch(() => fail("sourceLeft"));
       }
       j.state = "done";
     } catch (e) {
-      j.state = j.cancel ? "cancelled" : "failed";
-      j.error = j.cancel ? "" : e?.code || "fileFailed";
-      // The name was free when the job began, so all that is there is the job's own.
-      await fsp.rm(j.to, { recursive: true, force: true }).catch(() => {});
-      await fsp.rm(j.to + PART, { force: true }).catch(() => {});
+      j.state = j.cancel && !kept ? "cancelled" : "failed";
+      j.error = j.state === "cancelled" ? "" : e?.code || "fileFailed";
+      // Only what the job itself made: its folder (made, not found, when the name was taken), its unfinished file, or
+      // the file it gave a name to.
+      if (!kept) {
+        if (j.dir) await fsp.rm(j.to, { recursive: true, force: true }).catch(() => {});
+        else {
+          await fsp.rm(j.to + PART, { force: true }).catch(() => {});
+          if (j.placed) await fsp.rm(j.to, { force: true }).catch(() => {});
+        }
+      }
     }
     j.done = true;
+    release(jobSlots, j.peer);
     try { notify(j.peer, "files.job", jobOut(j)); } catch {}
     setTimeout(() => jobs.delete(j.id), JOB_KEEP_MS).unref?.();
   }
   // {from, to, move?} -> the job, begun: a file or a folder with all in it, to a name that is free.
   async function copy(peer, p) {
     const from = whole(p?.from), wanted = whole(p?.to);
-    if (isRoot(from)) fail("rootRefused");
-    const st = await fsp.stat(from).catch(failed);
-    // Beside itself is not into itself: a folder copied where it is gets the numbered name.
-    if (st.isDirectory() && !same(from, wanted) && inside(from, wanted)) fail("intoItself");
-    await folderOf(wanted);
-    if ([...jobs.values()].filter(x => x.peer === peer && !x.done).length >= MAX_JOBS) fail("tooManyJobs");
-    const to = await freeName(wanted, st.isDirectory());
-    const j = { id: crypto.randomUUID(), peer, from, to, move: Boolean(p?.move), state: "running", files: 0, bytes: 0, total: 0, skipped: 0, error: "", cancel: false, done: false };
+    take(jobSlots, peer, MAX_JOBS);
+    let j;
+    try {
+      const st = await fsp.stat(from).catch(failed);
+      const real = await realOf(from);
+      if (isRoot(from) || isRoot(real)) fail("rootRefused");
+      const parent = await folderOf(wanted);
+      // Beside itself is not into itself: a folder copied where it is gets the numbered name. By what the paths lead
+      // to as well, so that another spelling of the folder does not pass.
+      const target = path.join(await realOf(parent), path.basename(wanted));
+      if (st.isDirectory() && ((!same(real, target) && inside(real, target)) || (!same(from, wanted) && inside(from, wanted)))) fail("intoItself");
+      const dir = st.isDirectory();
+      const to = await reserve(wanted, dir);
+      j = { id: crypto.randomUUID(), peer, from, to, dir, toReal: dir ? await realOf(to) : "", placed: false, move: Boolean(p?.move), state: "running", files: 0, bytes: 0, total: 0, skipped: 0, error: "", cancel: false, done: false };
+    } catch (e) { release(jobSlots, peer); throw e; }
     jobs.set(j.id, j);
     j.run = runJob(j);
     return jobOut(j);
@@ -320,6 +399,7 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
   }
   async function drop(u) {
     if (!uploads.delete(u.id)) return;
+    release(uploadSlots, u.peer);
     clearTimeout(u.timer);
     await u.busy.catch(() => {});
     await u.fh.close().catch(() => {});
@@ -329,10 +409,13 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
   // {path, size} -> { upload, path }: a file of that many bytes is coming; the path is the name it will get.
   async function begin(peer, p) {
     const wanted = whole(p?.path), size = int(p?.size, 0, MAX_SIZE);
-    await folderOf(wanted);
-    if ([...uploads.values()].filter(x => x.peer === peer).length >= MAX_UPLOADS) fail("tooManyJobs");
-    const file = await freeName(wanted, false);
-    const fh = await fsp.open(file + PART, "wx").catch(failed);
+    take(uploadSlots, peer, MAX_UPLOADS);
+    let file, fh;
+    try {
+      await folderOf(wanted);
+      file = await reserve(wanted, false);
+      fh = await fsp.open(file + PART, "r+").catch(failed);
+    } catch (e) { release(uploadSlots, peer); throw e; }
     const u = { id: crypto.randomUUID(), peer, file, part: file + PART, fh, size, written: 0, busy: Promise.resolve(), writing: false };
     uploads.set(u.id, u);
     touch(u);
@@ -356,12 +439,12 @@ function createFiles({ home = "", trash = null, notify = () => {} } = {}) {
     const u = uploadOf(peer, p?.upload);
     if (u.writing || u.written !== u.size) fail("invalidData");
     uploads.delete(u.id);
+    release(uploadSlots, u.peer);
     clearTimeout(u.timer);
     await u.fh.close().catch(() => {});
     try {
-      // A name taken since the upload began is not written over either.
-      if (await lstat(u.file)) u.file = await freeName(u.file, false);
-      await fsp.rename(u.part, u.file);
+      // A name taken since the upload began is not written over either: the next numbered one.
+      u.file = await settle(u.part, u.file);
     } catch (e) {
       await fsp.rm(u.part, { force: true }).catch(() => {});
       return failed(e);

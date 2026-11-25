@@ -49,6 +49,7 @@ const MESSAGES = {
   tooManyJobs: "Too many copies or uploads run there. Wait for one to finish.",
   jobMissing: "That copy or upload is no longer known there.",
   diskFull: "The disk there is full.",
+  sourceLeft: "It was copied, but the original could not be removed and was left where it was.",
   fileFailed: "The file system there refused it.",
   // Typing into a session (send-text.js); the command centre shows these texts as they are.
   agentNotReady: "The agent is not ready; nothing was sent.",

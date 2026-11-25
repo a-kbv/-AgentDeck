@@ -242,6 +242,128 @@ async function alone(root) {
 }
 
 // A real phone -> relay -> host: the methods are served, to a peer with control only, and a 1 MB file comes whole.
+// What a review found and a test did not: two things going for one name, a move whose source cannot all go, another
+// spelling of a path, and requests sent together.
+async function hard(root) {
+  const home = path.join(root, "users", "me"), work = path.join(root, "work");
+  await fsp.mkdir(home, { recursive: true }); await fsp.mkdir(work);
+  const at = (...p) => path.join(work, ...p);
+  const files = createFiles({ home });
+  const done = async (f, job) => finished(f, "A", job);
+
+  // ---------- a move whose source cannot be removed ----------
+  const src = at("src");
+  await fsp.mkdir(path.join(src, "busy"), { recursive: true });
+  for (const n of ["a.txt", "busy/x.txt", "z.txt"]) await fsp.writeFile(path.join(src, n), n);
+  // The first file goes, then the removal fails - as with a folder some program still works in.
+  const stubborn = createFiles({ home, rm: async p => { await fsp.rm(path.join(p, "a.txt")); throw Object.assign(new Error("busy"), { code: "EBUSY" }); } });
+  const m = await stubborn.copy("A", { from: src, to: at("moved"), move: true });
+  const mEnd = await finished(stubborn, "A", m.job);
+  assert.deepEqual([mEnd.state, mEnd.error], ["failed", "sourceLeft"]);
+  assert.deepEqual(await tree(at("moved")), ["a.txt", "busy/", "busy/x.txt", "z.txt"], "the copy stays whole: part of the source is already gone");
+  assert.equal(await fsp.readFile(at("moved", "a.txt"), "utf8"), "a.txt");
+  await fsp.rm(at("moved"), { recursive: true }); await fsp.rm(src, { recursive: true });
+
+  // What a copy skips is not copied, so a move must not take the source with it.
+  let links = true;
+  await fsp.mkdir(at("holed"));
+  await fsp.writeFile(at("holed", "kept.txt"), "kept");
+  try { await fsp.symlink(at("nowhere"), at("holed", "dangling"), "junction"); } catch { links = false; }
+  if (links) {
+    const h = await files.copy("A", { from: at("holed"), to: at("holed-moved"), move: true });
+    const hEnd = await done(files, h.job);
+    assert.deepEqual([hEnd.state, hEnd.error, hEnd.skipped], ["failed", "sourceLeft", 1]);
+    assert.equal(fs.existsSync(at("holed", "dangling")) || fs.lstatSync(at("holed", "dangling")).isSymbolicLink(), true, "the source is whole");
+    assert.equal(await fsp.readFile(at("holed", "kept.txt"), "utf8"), "kept");
+    assert.equal(await fsp.readFile(at("holed-moved", "kept.txt"), "utf8"), "kept", "and what was copied stays too");
+  }
+  console.log("ok: a move that cannot remove all of its source keeps the copy; one that skipped something keeps the source");
+
+  // ---------- two for one name ----------
+  await fsp.mkdir(at("a")); await fsp.mkdir(at("b")); await fsp.mkdir(at("dst"));
+  await fsp.writeFile(at("a", "report.txt"), "AAAA from a"); await fsp.writeFile(at("b", "report.txt"), "BBBB from b");
+  const [ja, jb] = await Promise.all([
+    files.copy("A", { from: at("a", "report.txt"), to: at("dst", "report.txt"), move: true }),
+    files.copy("A", { from: at("b", "report.txt"), to: at("dst", "report.txt"), move: true })
+  ]);
+  assert.notEqual(ja.to, jb.to, "each got a name of its own at once");
+  assert.equal((await done(files, ja.job)).state, "done"); assert.equal((await done(files, jb.job)).state, "done");
+  assert.deepEqual((await Promise.all((await tree(at("dst"))).map(n => fsp.readFile(at("dst", n), "utf8")))).sort(), ["AAAA from a", "BBBB from b"], "both files are there");
+  // A big copy is under way; someone makes a folder of its name, and a small one is moved to it.
+  await fsp.mkdir(at("big"));
+  for (let i = 0; i < 30; i++) await fsp.writeFile(at("big", `f${i}.bin`), Buffer.alloc(1024 * 1024, i));
+  await fsp.mkdir(at("small", "big"), { recursive: true }); await fsp.writeFile(at("small", "big", "precious.txt"), "precious");
+  const big = await files.copy("A", { from: at("big"), to: at("dst", "big") });
+  await assert.rejects(files.mkdir({ path: at("dst", "big") }), code("exists"), "the name is the copy's from the start");
+  const small = await files.copy("A", { from: at("small", "big"), to: at("dst", "big"), move: true });
+  assert.equal(small.to, at("dst", "big (2)"));
+  assert.equal((await done(files, small.job)).state, "done");
+  await files.cancel("A", { job: big.job });
+  assert.equal(await fsp.readFile(at("dst", "big (2)", "precious.txt"), "utf8"), "precious", "a stopped copy removes only what it made");
+  // A name taken while an upload was coming is not written over when it is whole.
+  const up = await files.begin("A", { path: at("dst", "up.txt"), size: 3 });
+  await files.write("A", { upload: up.upload, pos: 0, data: Buffer.from("new").toString("base64") });
+  await fsp.writeFile(at("dst", "up.txt"), "theirs");
+  assert.equal((await files.commit("A", { upload: up.upload })).path, at("dst", "up (2).txt"));
+  assert.equal(await fsp.readFile(at("dst", "up.txt"), "utf8"), "theirs");
+  console.log("ok: two for one name both keep theirs; a stopped copy removes only its own; a late name is not written over");
+
+  // ---------- limits, with requests sent together ----------
+  const begun = await Promise.allSettled(Array.from({ length: 10 }, (_, i) => files.begin("L", { path: at("dst", `u${i}.bin`), size: 1 })));
+  assert.equal(begun.filter(x => x.status === "fulfilled").length, 2, "two uploads for a peer, however they are asked for");
+  assert.ok(begun.filter(x => x.status === "rejected").every(x => x.reason.code === "tooManyJobs"));
+  await files.drop("L");
+  const copies = await Promise.allSettled(Array.from({ length: 10 }, (_, i) => files.copy("L", { from: at("big"), to: at("dst", `c${i}`) })));
+  assert.equal(copies.filter(x => x.status === "fulfilled").length, 2, "and two copies");
+  for (const c of copies) if (c.status === "fulfilled") await files.cancel("L", { job: c.value.job });
+  const again = await files.begin("L", { path: at("dst", "after.bin"), size: 1 });
+  await files.abort("L", { upload: again.upload });
+  console.log("ok: a peer's two uploads and two copies hold for requests sent together, and come free again");
+
+  // ---------- other spellings of a path ----------
+  await fsp.writeFile(at("foo"), "plain");
+  let blank = true;
+  try { await fsp.writeFile(at("foo "), "with a blank"); blank = (await fsp.readdir(work)).includes("foo "); } catch { blank = false; }
+  if (blank) {
+    assert.equal(Buffer.from((await files.read({ path: at("foo "), pos: 0, len: 100 })).data, "base64").toString(), "with a blank");
+    await files.remove({ path: at("foo ") });
+    assert.equal(await fsp.readFile(at("foo"), "utf8"), "plain", "a name that ends in a blank is not the name without it");
+  } else console.log("   (no name can end in a blank here: that check is left out)");
+  if (process.platform === "win32") {
+    await assert.rejects(files.remove({ path: "\\\\?\\" + home }), code("invalidData"));
+    await assert.rejects(files.stat({ path: "\\\\.\\" + work }), code("invalidData"));
+  }
+  await assert.rejects(files.remove({ path: path.dirname(home) }), code("rootRefused"), "what holds the home is not deleted either");
+  assert.equal(fs.existsSync(home), true);
+  if (links) {
+    await fsp.symlink(home, at("home-link"), "junction");
+    await files.remove({ path: at("home-link") });
+    assert.equal(fs.existsSync(home), true, "a link to the home goes; the home stays");
+    await fsp.mkdir(at("p")); await fsp.writeFile(at("p", "f.txt"), "f");
+    await fsp.symlink(at("p"), at("p-link"), "junction");
+    await assert.rejects(files.copy("A", { from: at("p-link"), to: at("p", "sub") }), code("intoItself"), "a folder under another spelling is still itself");
+  }
+  // Letters' case: the same file may be renamed; another file with that name may not be written over.
+  await fsp.writeFile(at("notes.txt"), "lower");
+  let twoCases = true;
+  try { await fsp.writeFile(at("Notes.txt"), "upper", { flag: "wx" }); } catch { twoCases = false; }
+  if (twoCases) {
+    await assert.rejects(files.rename({ from: at("notes.txt"), to: at("Notes.txt") }), code("exists"));
+    assert.equal(await fsp.readFile(at("Notes.txt"), "utf8"), "upper");
+  } else {
+    await files.rename({ from: at("notes.txt"), to: at("Notes.txt") });
+    assert.ok((await fsp.readdir(work)).includes("Notes.txt"), "only the letters' case changed");
+    assert.equal(await fsp.readFile(at("Notes.txt"), "utf8"), "lower");
+  }
+  await fsp.writeFile(at("r1.txt"), "one"); await fsp.writeFile(at("r2.txt"), "two");
+  await assert.rejects(files.rename({ from: at("r1.txt"), to: at("r2.txt") }), code("exists"));
+  await files.rename({ from: at("r1.txt"), to: at("r3.txt") });
+  assert.deepEqual([fs.existsSync(at("r1.txt")), await fsp.readFile(at("r3.txt"), "utf8"), await fsp.readFile(at("r2.txt"), "utf8")], [false, "one", "two"]);
+  assert.ok(!(await tree(work)).some(x => x.endsWith(PART)), "no unfinished file is left");
+  console.log("ok: a blank at a name's end, a path round the names' rules, what holds the home, a link's other spelling, letters' case");
+  await files.dispose(); await stubborn.dispose();
+}
+
 async function served(root) {
   const work = path.join(root, "served");
   await fsp.mkdir(work);
@@ -380,6 +502,7 @@ async function offered(root) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "agentdeck-files-"));
   try {
     await alone(root);
+    await hard(path.join(root, "hard"));
     await served(root);
     await offered(root);
     console.log("files: all checks passed");

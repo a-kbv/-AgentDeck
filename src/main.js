@@ -1996,7 +1996,7 @@ if (!app.requestSingleInstanceLock()) {
     }
     quitting = true;
     // A file under way stops after its piece and leaves no unfinished file behind.
-    const shutdown = Promise.all([(async () => { await voiceStarting; await voice?.dispose(); })(), host.flush(), saveWorkspaceFinal(), transfers.dispose()]);
+    const shutdown = Promise.all([(async () => { await voiceStarting; await voice?.dispose(); })(), host.flush(), saveWorkspaceFinal(), transfers.dispose(), served.files.dispose()]);
     const graced = Promise.race([shutdown, new Promise(r => setTimeout(r, QUIT_GRACE_MS))])
       .catch(err => console.error("Voice shutdown failed:", err));
     // A recording being saved has a limit of its own.
@@ -2009,6 +2009,7 @@ if (!app.requestSingleInstanceLock()) {
     forwards.dispose();
     served.browser.dispose();
     transfers.dispose();
+    served.files.dispose().catch(() => {});
     // The copies of PDFs opened from the Files dialog (one still open in its program stays).
     if (previewDir) try { fs.rmSync(previewDir, { recursive: true, force: true }); } catch {}
     links.stop();
