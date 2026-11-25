@@ -21,6 +21,8 @@
 //                                 (docs/SHARED-SESSIONS.md 4): viewers, a driver, terminals.resize. Without it the
 //                                 phone keeps the older way (a resize frame for "Fit to phone"). ports: 1 marks one
 //                                 that forwards its loopback ports (without it: "update AgentDeck there").
+//                                 browser: 1 marks same-Chrome tab control (docs/BROWSER.md; the browser screen
+//                                 requests browser.* directly on this provider).
 //        "sessions.list"     -> Snapshot (projects.js localSnapshot):
 //                               { registry: { projects: [{ name, path }] },
 //                                 sessions: [{ id, agent, cwd, title, prompt?, recap?, projectName?, updatedAt }],

@@ -440,6 +440,8 @@ Install and authenticate agents on the host itself, using a remote terminal for 
 
 A dev server started in a remote terminal listens on that computer's `localhost`. The **Ports** button in the terminal's header lists what listens there — the terminal's own ports first — and **Other port…** takes a number by hand. Choosing a port forwards it through the same encrypted link, also through a relay, and opens `http://localhost:<port>` in your browser; the phone app has the same list under **More → Ports** and shows the page inside the app. Only `localhost` of that computer is reachable this way, the forward lives while the link does, and both computers need a version that has the menu.
 
+The phone's **Browser** button controls the computer's **existing Chrome tabs**, including signing in when an agent needs your help. Open it from a computer, a session, or the terminal's **More → Browser** menu. Enable Remote Debugging in Chrome 144+ and approve the initial connection on the computer first. You can tap, type, scroll, zoom, navigate and open tabs; leaving the view keeps the tab and its login on the computer. See [setup and limitations](docs/BROWSER.md).
+
 > [!IMPORTANT]
 > Pairing grants meaningful control: a paired computer or phone can launch terminals and sessions on the host, type into the ones running there and open the ports that listen on its `localhost`. Pair only your own devices, and keep a desktop's mesh port off the public internet — the port meant to be reachable from outside is the relay's.
 

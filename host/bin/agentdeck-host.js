@@ -266,6 +266,7 @@ async function run() {
   const stop = () => {
     log("stopping");
     links.stop();
+    served?.browser.dispose();
     host?.stop();
     host?.terminals.detachAll();
     process.exit(0);
