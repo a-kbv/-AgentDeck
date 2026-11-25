@@ -99,7 +99,7 @@ public class FilesPlugin extends Plugin {
     public void load() {
         File old = new File(getContext().getCacheDir(), DIR);
         // A file of an earlier run is nobody's any more ("file" ids are for one run).
-        execute(() -> deleteTree(old));
+        onDisk(() -> deleteTree(old));
     }
 
     // ---- the calls ----------------------------------------------------------------------------------------------
@@ -340,7 +340,7 @@ public class FilesPlugin extends Plugin {
     @Override
     protected void handleOnDestroy() {
         ContentResolver resolver = getContext().getContentResolver();
-        execute(() -> {
+        onDisk(() -> {
             for (Entry e : entries.values()) {
                 if (!e.finished) discard(e, resolver);
             }
@@ -367,7 +367,7 @@ public class FilesPlugin extends Plugin {
         }
     }
 
-    private void execute(Runnable task) {
+    private void onDisk(Runnable task) {
         try {
             io.execute(() -> {
                 try { task.run(); } catch (RuntimeException ex) { Log.w(TAG, "cleanup failed", ex); }
