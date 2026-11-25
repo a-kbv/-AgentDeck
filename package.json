@@ -21,6 +21,8 @@
     "test:devices": "node scripts/test-device-view.js",
     "test:relay": "node scripts/test-relay.js",
     "test:port-forward": "node scripts/test-port-forward.js && node scripts/test-port-forward-relay.js",
+    "test:browser": "node scripts/test-browser.js",
+    "test:browser-live": "node scripts/test-browser-live.js",
     "test:ports-app": "node scripts/test-ports-electron.cjs",
     "test:mesh": "node scripts/test-mesh.js && node scripts/test-mesh-mapped-port.js",
     "test:remote-projects": "node scripts/test-remote-projects.js",

@@ -1849,6 +1849,7 @@ if (!app.requestSingleInstanceLock()) {
     orchestrator.stop();
     host.stop();
     forwards.dispose();
+    served.browser.dispose();
     links.stop();
     globalShortcut.unregisterAll();
     // Quitting without before-quit (Windows ending the session) still saves the layout, at once.

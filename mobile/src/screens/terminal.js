@@ -229,6 +229,7 @@ export function render(el, ctx, p) {
       cwd && handle?.online ? { key: "shell", icon: "termPlus", label: t("session.shell") } : null,
       // Only where the app can listen (its Forward plugin: not in a browser); lit while this computer has a forward.
       ctx.forwards?.available ? { key: "ports", icon: "globe", label: t("ports.title"), on: ctx.forwards.list().some(f => f.node === p.node) } : null,
+      { key: "browser", icon: "globe", label: t("browser.title") },
       { key: "stop", icon: x ? "stop" : "power", label: x ? t("term.stopSession") : t("term.close"), danger: true }
     ].filter(Boolean));
     if (closed) return;
@@ -238,6 +239,7 @@ export function render(el, ctx, p) {
     else if (pick === "chat") openChat();
     else if (pick === "shell") shellHere(cwd);
     else if (pick === "ports") openPorts(ctx, { node: p.node, term: p.term, cwd });
+    else if (pick === "browser") ctx.go("browser", { node: p.node });
     else if (pick === "stop") stop();
   }
   // The terminal's text: the lines in view (count 0), or the last `count` lines of everything it holds; a line the

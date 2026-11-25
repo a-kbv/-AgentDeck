@@ -5,6 +5,35 @@
    height of what is visible above the soft keyboard (--vvh, set by main.js from visualViewport). */
 @import "@xterm/xterm/css/xterm.css";
 
+/* The existing Chrome on a computer, viewed over the mesh; the image's own box is also the input coordinate box. */
+.remote-browser { min-height: 0; }
+.browser-list .browser-tab { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px; text-align: left; border-bottom: 1px solid var(--line); }
+.browser-tab > span { min-width: 0; flex: 1; }
+.browser-tab b, .browser-tab small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.browser-tab small { color: var(--muted); margin-top: 4px; }
+.browser-new { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 12px; margin: 8px 0; }
+.browser-setup { padding: 12px; line-height: 1.6; }
+.browser-setup code { display: block; user-select: text; overflow-wrap: anywhere; color: var(--accent); }
+.browser-view { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: hidden; }
+.browser-view[hidden] { display: none; }
+.browser-toolbar, .browser-type, .browser-address, .browser-keys { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.browser-toolbar { border-bottom: 1px solid var(--line); padding: 3px; flex-shrink: 0; }
+.browser-address { flex: 1; }
+.browser-address input, .browser-type input { min-width: 0; flex: 1; width: 0; font-size: 16px; }
+.browser-address input { padding: 8px 5px; }
+.browser-toolbar .icon-btn { flex-shrink: 0; width: 36px; }
+.browser-canvas { flex: 1; min-height: 80px; overflow: auto; display: flex; align-items: center; justify-content: center; background: #090b10; }
+.browser-image { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; touch-action: none; user-select: none; -webkit-user-drag: none; }
+.browser-image[hidden] { display: none; }
+.browser-canvas.zoomed { display: block; }
+.browser-canvas.zoomed .browser-image { max-width: none; max-height: none; }
+.browser-state { padding: 8px 12px; color: var(--muted); flex-shrink: 0; }
+.browser-hint { margin: 0; padding: 6px 12px; flex-shrink: 0; }
+.browser-type { padding: 4px 8px; border-top: 1px solid var(--line); flex-shrink: 0; }
+.browser-keys { padding: 0 8px calc(4px + env(safe-area-inset-bottom)); flex-shrink: 0; }
+.browser-keys button { min-height: 44px; flex: 1; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 4px; font-size: 12px; }
+.kb-open .browser-hint { display: none; }
+
 :root {
   color-scheme: dark;
   --bg: #0d1015;

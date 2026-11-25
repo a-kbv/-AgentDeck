@@ -36,6 +36,7 @@ const { TEXT_MAX } = require("../host/send-text");
 const { createPortStreams } = require("../host/port-streams");
 const { resolveFolder } = require("../host/project-folder");
 const { getProject, addProject } = require("../host/registry");
+const { createBrowser } = require("../host/browser");
 // The most of one message a peer may ask sessions.preview for. A preview is six messages: at this bound it is at
 // most about 100 000 characters (a few hundred kilobytes for text that is not Latin) - still quick over a mobile
 // link, which carries it through the relay in 32 KB pieces - and all but the longest answers fit whole.
@@ -58,7 +59,7 @@ const dim = v => {
 // host: host/index.js (equipTerminals: terminals, launch, viewers, tabs(), liveSessions()); env(): the environment
 // for a terminal opened for a peer (a promise; with the proxy, on a desktop); info(): what host.info adds (the node's
 // own description comes from the links); liveMs: how often the live status is looked at for the peers.
-function createServed({ host, env = async () => terminalEnv(process.env), info = () => ({}), liveMs = LIVE_MS }) {
+function createServed({ host, env = async () => terminalEnv(process.env), info = () => ({}), liveMs = LIVE_MS, browser = createBrowser() }) {
   const { terminals, launch, sendText, sessions, git, setup, viewers } = host;
   const path = require("node:path");
   const fs = require("node:fs");
@@ -122,7 +123,7 @@ function createServed({ host, env = async () => terminalEnv(process.env), info =
     // terminals: 2 - this host shares its terminals as docs/SHARED-SESSIONS.md 4 says (viewers, driver, resize).
     // ports: 1 - it forwards its loopback ports (ports.*, docs/PORT-FORWARDING.md).
     // projects: 1 - it takes a folder of its own as a project from a peer (projects.add).
-    "host.info": () => ({ ...(links?.self() || {}), code: undefined, platform: process.platform, home: host.home, agents: sessions.get()?.agents || [], terminals: 2, ports: 1, projects: 1, ...info() }),
+    "host.info": () => ({ ...(links?.self() || {}), code: undefined, platform: process.platform, home: host.home, agents: sessions.get()?.agents || [], terminals: 2, ports: 1, projects: 1, browser: 1, ...info() }),
     // {path}: a folder of this computer listed as a project here, so a peer has somewhere to work on a computer that
     // lists nothing yet. The path is the peer's own typing (it sees none of the folders here): project-folder.js takes
     // it only when it is a whole path to a folder that exists (folderNotAbsolute, folderMissing, notFolder). Nothing
@@ -261,6 +262,12 @@ function createServed({ host, env = async () => terminalEnv(process.env), info =
     // stream's bytes then pass as frames (port-streams.js: refused, notAllowed, tooManyStreams, invalidData).
     "ports.open": (p, peer) => ports.open(peer.id, p?.stream, p?.port),
     "ports.close": (p, peer) => { ports.close(peer.id, str(p?.stream, 36)); return true; },
+    "browser.list": (p, peer) => browser.list(peer.id),
+    "browser.attach": (p, peer) => browser.attach(peer.id, p),
+    "browser.frame": (p, peer) => browser.frame(peer.id, p),
+    "browser.input": (p, peer) => browser.input(peer.id, p),
+    "browser.open": (p, peer) => browser.open(peer.id, p),
+    "browser.detach": (p, peer) => browser.detach(peer.id, p),
     "git.branches": p => setup.branches(str(p?.dir, 4096)),
     "setup.status": () => setup.status(),
     "setup.sshKey.generate": () => setup.generateKey(),
@@ -376,11 +383,12 @@ function createServed({ host, env = async () => terminalEnv(process.env), info =
       ctl.delete(node);
       behind.delete(node);
       ports.drop(node);
+      browser.drop(node);
       viewers.leave(node);
     });
   }
 
-  return { api, attach, ports, get layout() { return layout; } };
+  return { api, attach, ports, browser, get layout() { return layout; } };
 }
 
 module.exports = { createServed };

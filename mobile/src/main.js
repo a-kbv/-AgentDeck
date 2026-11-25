@@ -26,8 +26,9 @@ import * as terminalScreen from "./screens/terminal.js";
 import * as newScreen from "./screens/new-session.js";
 import * as computersScreen from "./screens/computers.js";
 import * as nodeScreen from "./screens/node.js";
+import * as browserScreen from "./screens/browser.js";
 
-const SCREENS = { pair: pairScreen, pairing: pairingScreen, routes: routesScreen, scan: scanScreen, diag: diagScreen, inbox: inboxScreen, session: sessionScreen, terminal: terminalScreen, new: newScreen, computers: computersScreen, node: nodeScreen };
+const SCREENS = { pair: pairScreen, pairing: pairingScreen, routes: routesScreen, scan: scanScreen, diag: diagScreen, inbox: inboxScreen, session: sessionScreen, terminal: terminalScreen, browser: browserScreen, new: newScreen, computers: computersScreen, node: nodeScreen };
 const TABS = ["inbox", "new", "computers"];
 const META_KEY = "agentdeck.nodes"; // provider-relay.js meta: which nodes are relays, when each was last seen (not secret)
 

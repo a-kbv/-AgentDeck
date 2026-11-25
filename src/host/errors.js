@@ -28,6 +28,15 @@ const MESSAGES = {
   // Forwarded ports (port-streams.js; docs/PORT-FORWARDING.md).
   refused: "Nothing listens on that port there.",
   tooManyStreams: "Too many connections are open through forwarded ports there.",
+  browserSetupRequired: "Enable Remote Debugging in the open Chrome on this computer.",
+  browserUnavailable: "Chrome did not connect. Check the connection prompt on the computer.",
+  browserDisconnected: "The connection to Chrome ended.",
+  browserNotViewing: "This device no longer has the browser tab open.",
+  browserTabGone: "The tab was closed or opened a browser-internal page.",
+  browserCommandFailed: "Chrome could not complete the action.",
+  browserTimeout: "Chrome did not answer in time.",
+  browserBusy: "The browser is busy or has too many open views.",
+  browserFrameTooBig: "The browser page image is too large.",
   // Typing into a session (send-text.js); the command centre shows these texts as they are.
   agentNotReady: "The agent is not ready; nothing was sent.",
   agentStopped: "The agent stopped before the message could be submitted.",
